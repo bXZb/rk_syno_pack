@@ -1,0 +1,6 @@
+# NAME		PATH
+package-file	package-file
+bootloader	MiniLoaderAll.bin
+parameter	parameter.txt
+uboot		uboot.img
+boot		boot.img
