@@ -1,0 +1,166 @@
+name: Convert Concept TFLite to RKNN
+
+on:
+  workflow_dispatch:
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install deps + build SynoXtract
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libsodium-dev libmsgpack-dev curl xxd
+          g++ -O2 -std=c++17 -o tools/SynoXtract/synoxtract tools/SynoXtract/main.cpp -lsodium
+          echo "BUILD_OK $(ls -la tools/SynoXtract/synoxtract)"
+
+      - name: Download and decrypt x86 SPK
+        run: |
+          set -euo pipefail
+          curl -L --fail -o x86.spk "https://global.synologydownload.com/download/Package/spk/SynologyPhotos/1.9.1-10928/SynologyPhotos-x86_64-1.9.1-10928.spk"
+          mkdir -p out/x86x out/x86
+          ./tools/SynoXtract/synoxtract -i x86.spk -d out/x86x
+          echo "=== synoxtract produced:"
+          ls -la out/x86x/
+          FMT=$(file -b out/x86x/package.tgz)
+          echo "=== package.tgz is: $FMT"
+          case "$FMT" in
+            *XZ*)  tar xJf out/x86x/package.tgz -C out/x86 ;;
+            *gzip*) tar xzf out/x86x/package.tgz -C out/x86 ;;
+            *bzip2*) tar xjf out/x86x/package.tgz -C out/x86 ;;
+            *) tar xf out/x86x/package.tgz -C out/x86 ;;
+          esac
+          echo "=== concept detector dir:"
+          ls -la out/x86/models/concept/detector/
+          echo "=== tflite magic ==="
+          xxd -l 32 out/x86/models/concept/detector/model_float16.tflite
+
+      - name: Upload extracted tflite + labels
+        uses: actions/upload-artifact@v4
+        with:
+          name: concept-tflite
+          path: |
+            out/x86/models/concept/detector/model_float16.tflite
+            out/x86/models/concept/detector/labels.txt
+            out/x86/models/concept/detector/thresholds.txt
+          if-no-files-found: error
+
+      - name: Install tf2onnx (tensorflow-cpu) + rknn-toolkit2
+        run: |
+          set -euo pipefail
+          pip install --quiet "numpy==1.26.4" psutil "ruamel.yaml" scipy tqdm opencv-python fast-histogram
+          pip install --quiet "onnx==1.16.1" "onnxruntime==1.16.3" "protobuf==4.25.4"
+          pip install --quiet "tensorflow-cpu==2.15.1" "tf2onnx==1.16.1"
+          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          python -c "import torch; print('torch', torch.__version__)"
+          pip install --quiet "protobuf==4.25.4" "numpy==1.26.4"
+          python -c "import tensorflow as tf; print('tf', tf.__version__)"
+          python -c "import tf2onnx; print('tf2onnx', tf2onnx.__version__)"
+          python -c "import onnx; print('onnx', onnx.__version__)"
+          pip download rknn-toolkit2==2.3.2 --no-deps -d whl
+          pip install --quiet --no-deps whl/rknn_toolkit2-2.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+          python -c "from rknn.api import RKNN; print('rknn api ok')"
+
+      - name: Convert TFLite -> ONNX -> RKNN
+        run: |
+          set -euo pipefail
+          python - << 'EOF'
+          import os, types, numpy as np
+          import onnx
+
+          def apply_mapping_shim():
+              # rknn-toolkit2 compiled .so references onnx.mapping (removed in onnx>=1.14)
+              if not hasattr(onnx, 'mapping'):
+                  m = types.SimpleNamespace()
+                  m.TENSOR_TYPE_TO_NP_TYPE = {
+                      1: np.dtype('float32'), 2: np.dtype('uint8'), 3: np.dtype('int8'),
+                      4: np.dtype('uint16'), 5: np.dtype('int16'), 6: np.dtype('int32'),
+                      7: np.dtype('int64'), 9: np.dtype('bool'), 10: np.dtype('float16'),
+                      11: np.dtype('float64'), 12: np.dtype('uint32'), 13: np.dtype('uint64'),
+                      14: np.dtype('complex64'), 15: np.dtype('complex128'),
+                  }
+                  m.NP_TYPE_TO_TENSOR_TYPE = {v: k for k, v in m.TENSOR_TYPE_TO_NP_TYPE.items()}
+                  m.TENSOR_TYPE_TO_STORAGE_TENSOR_TYPE = m.TENSOR_TYPE_TO_NP_TYPE
+                  onnx.mapping = m
+                  print('onnx.mapping shim injected')
+          apply_mapping_shim()
+
+          src = 'out/x86/models/concept/detector/model_float16.tflite'
+          assert os.path.exists(src), 'tflite missing'
+
+          # ---- tflite -> onnx via tf2onnx ----
+          import subprocess
+          r = subprocess.run(['python','-m','tf2onnx.convert','--tflite',src,
+                              '--output','concept.onnx','--opset','13'],
+                             capture_output=True, text=True)
+          print(r.stdout[-2000:]); print(r.stderr[-2000:])
+          assert os.path.exists('concept.onnx'), 'tf2onnx failed'
+
+          m = onnx.load('concept.onnx')
+          print('onnx ir', m.ir_version, 'opset', [(o.domain, o.version) for o in m.opset_import])
+          print('onnx inputs', [(i.name, [d.dim_value for d in i.type.tensor_type.shape.dim]) for i in m.graph.input])
+          print('onnx outputs', [(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim]) for o in m.graph.output])
+
+          # ---- normalize input layout to NCHW (tf2onnx emits NHWC; rknn expects NCHW) ----
+          from onnx import helper
+          g = m.graph
+          inp = g.input[0]
+          dims = [d.dim_value for d in inp.type.tensor_type.shape.dim]
+          if len(dims) == 4 and dims[3] == 3:
+              orig_name = inp.name
+              nchw_name = orig_name + '_nchw'
+              inp.name = nchw_name
+              dims_nchw = [dims[0], dims[3], dims[1], dims[2]]
+              for i, v in enumerate(dims_nchw):
+                  inp.type.tensor_type.shape.dim[i].dim_value = v
+              tp = helper.make_node('Transpose', [nchw_name], [orig_name], perm=[0, 2, 3, 1], name='nchw_to_nhwc')
+              g.node.insert(0, tp)
+              onnx.save(m, 'concept.onnx')
+              print('input rewritten to NCHW', dims_nchw, 'via Transpose ->', orig_name)
+
+          # ---- smoke test: run the graph once to prove it is semantically sound ----
+          import onnxruntime as ort
+          sess = ort.InferenceSession('concept.onnx', providers=['CPUExecutionProvider'])
+          ishape = [d if isinstance(d, int) else 1 for d in sess.get_inputs()[0].shape]
+          dummy = np.random.rand(*ishape).astype(np.float32)
+          out = sess.run(None, {sess.get_inputs()[0].name: dummy})
+          print('smoke output', [o.shape for o in out], 'finite:', bool(np.isfinite(out[0]).all()))
+          del sess
+
+          # ---- onnx -> rknn (no mean/std: server feeds pre-normalized float input) ----
+          from rknn.api import RKNN
+          rknn = RKNN(verbose=True)
+          rknn.config(target_platform='rk3566')
+          ret = rknn.load_onnx(model='concept.onnx')
+          print('load_onnx ->', ret)
+          assert ret == 0, 'load_onnx failed'
+          ret = rknn.build(do_quantization=False)
+          print('build ->', ret)
+          assert ret == 0, 'build failed'
+          ret = rknn.export_rknn('concept_fp16.rknn')
+          print('export ->', ret)
+          assert ret == 0, 'export failed'
+          rknn.release()
+          print('FINAL OK', os.path.getsize('concept_fp16.rknn'))
+          EOF
+
+      - name: Upload rknn
+        uses: actions/upload-artifact@v4
+        with:
+          name: concept-rknn
+          path: |
+            concept_fp16.rknn
+            concept.onnx
+            out/x86/models/concept/detector/labels.txt
+            out/x86/models/concept/detector/thresholds.txt
+          if-no-files-found: error
