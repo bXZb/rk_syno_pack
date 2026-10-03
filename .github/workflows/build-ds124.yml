@@ -42,6 +42,16 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: Brick-flag guard (fail fast before wasting a build)
+        run: |
+          if grep -n "DRIVER_MODESET" patches-vpu/rga-dumb-drv.c; then
+            echo "ERROR: DRIVER_MODESET in rga-dumb-drv.c hard-bricks the box at boot."
+            echo "Incidents: 2026-10-02 boot-ms.img and 2026-10-03 CI build (docs/08 §三.13)."
+            echo "DRM_CAP_DUMB_BUFFER reporting is permanently dropped - userspace must use dma_heap."
+            exit 1
+          fi
+          echo "OK: rga-dumb-drv.c carries no DRIVER_MODESET"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -93,6 +103,13 @@ jobs:
           echo -n "slot1_sw_activity="; fdtget -t x "$DTB" /internal_slot@1/ahci sw_activity
           echo -n "green_default_trigger="; fdtget -t s "$DTB" /gpio-leds/green-led linux,default-trigger
           echo -n "npu_reg="; fdtget -t x "$DTB" /npu@fde40000 reg
+          echo "== RGA/VPU kernel config (from build .config, authoritative)"
+          grep -E "^CONFIG_ROCKCHIP_MULTI_RGA=|^# CONFIG_VIDEO_ROCKCHIP_RGA is not set|^CONFIG_DMABUF_HEAPS_CMA=" build/out/kernel-7.3/.config
+          grep -qE "^CONFIG_ROCKCHIP_MULTI_RGA=y" build/out/kernel-7.3/.config || { echo "ERROR: multi_rga missing from kernel config"; exit 1; }
+          grep -qE "^CONFIG_DMABUF_HEAPS_CMA=y" build/out/kernel-7.3/.config || { echo "ERROR: CMA heap missing - librga needs /dev/dma_heap/cma"; exit 1; }
+          grep -qE "^CONFIG_DRM_OEC_RGA_DUMB=y" build/out/kernel-7.3/.config || { echo "ERROR: DRM dumb buffer device missing for librga"; exit 1; }
+          echo "== DRM dumb device in DTB"
+          fdtget -t s "$DTB" /oec-rga-dumb compatible
           echo "== bootargs"
           grep -o 'root=[^ ]*\|sn=[^ ]*\|custom_sn=[^ ]*\|mac1=[^ ]*\|vender_format_version=[^ ]*\|syno_hw_version=[^ ]*' \
             output/dsm/boot-root/boot/extlinux/extlinux.conf

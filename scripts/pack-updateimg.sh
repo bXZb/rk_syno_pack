@@ -399,6 +399,133 @@ NBU_ALT_EOF
 	fi
 }
 
+# Switch the OEC box to Rockchip's multi_rga driver.
+#
+# The old V4L2 RGA driver (CONFIG_VIDEO_ROCKCHIP_RGA) only registers
+# /dev/video0, while current userspace librga (>= 2.x) talks to the
+# multi_rga misc device /dev/rga. Without it librga falls back to DRM and
+# issues DRM_IOCTL_MODE_CREATE_DUMB on the panfrost/RKNPU card, which
+# returns ENOSYS and segfaults the process. Both drivers match
+# compatible "rockchip,rga2", so exactly one of them may be enabled.
+patch_kernel_multi_rga()
+{
+	local defconfig="$KERNEL_SRC/arch/arm64/configs/$KERNEL_DEFCONFIG"
+	local rga_drv="$KERNEL_SRC/drivers/video/rockchip/rga3/rga_drv.c"
+
+	[ -f "$defconfig" ] || return 0
+	[ -f "$rga_drv" ] || return 0
+
+	if grep -q '^CONFIG_ROCKCHIP_MULTI_RGA=y' "$defconfig"; then
+		log "multi_rga driver already enabled in $KERNEL_DEFCONFIG"
+	else
+		log "switching to multi_rga driver (userspace librga needs /dev/rga)"
+		# The defconfig carries this symbol twice; the build warns
+		# "override: reassigning to symbol" and the last occurrence wins,
+		# so every line has to be neutralized, not just the first one.
+		# Tolerate CRLF: match the optional \r before end-of-line so the
+		# replacement works on a Windows-checkout kernel tree too.
+		perl -0pi -e 's/^CONFIG_VIDEO_ROCKCHIP_RGA=y\r?$/# CONFIG_VIDEO_ROCKCHIP_RGA is not set/gm' "$defconfig"
+		printf '\n# rk3566-oec-box: multi_rga for userspace librga /dev/rga\nCONFIG_ROCKCHIP_MULTI_RGA=y\nCONFIG_ROCKCHIP_RGA_ASYNC=y\n' >> "$defconfig"
+		grep -q '^CONFIG_ROCKCHIP_MULTI_RGA=y' "$defconfig" || die "$defconfig: failed to enable CONFIG_ROCKCHIP_MULTI_RGA"
+		if grep -qE '^CONFIG_VIDEO_ROCKCHIP_RGA=y\r?$' "$defconfig"; then
+			die "$defconfig: CONFIG_VIDEO_ROCKCHIP_RGA still enabled"
+		fi
+	fi
+
+	if grep -q '^# CONFIG_VIDEO_ROCKCHIP_RGA is not set' "$defconfig"; then
+		log "legacy V4L2 RGA disabled (conflicts with multi_rga)"
+	fi
+
+	# multi_rga binds compatible "rockchip,rga2"; the SoC dtsi must keep it.
+	local soc_dtsi="$KERNEL_SRC/arch/arm64/boot/dts/rockchip/rk3568.dtsi"
+	if [ -f "$soc_dtsi" ] && ! grep -q 'rockchip,rga2' "$soc_dtsi"; then
+		die "rk3568.dtsi: rga2 compatible missing"
+	fi
+
+	# librga/mpp allocate video buffers through /dev/dma_heap/cma. The stock
+	# defconfig leaves CONFIG_DMABUF_HEAPS_CMA off, so only /dev/dma_heap/system
+	# exists; userspace then falls back to a DRM allocation path that the
+	# panfrost/RKNPU card cannot serve (ENOSYS) and crashes. CONFIG_DMA_CMA is
+	# already =y in this defconfig, so the dependency is satisfied.
+	if grep -q '^# CONFIG_DMABUF_HEAPS_CMA is not set' "$defconfig"; then
+		perl -0pi -e 's/^# CONFIG_DMABUF_HEAPS_CMA is not set\r?$/CONFIG_DMABUF_HEAPS_CMA=y/gm' "$defconfig"
+		log "enabled CONFIG_DMABUF_HEAPS_CMA (/dev/dma_heap/cma for librga)"
+	fi
+	if grep -q '^CONFIG_DMABUF_HEAPS_CMA=y' "$defconfig"; then
+		log "dma-buf CMA heap already enabled"
+	fi
+	grep -q '^CONFIG_DMABUF_HEAPS_CMA=y' "$defconfig" || die "$defconfig: failed to enable CONFIG_DMABUF_HEAPS_CMA"
+}
+
+# Register a standalone CMA-backed DRM device that only implements the dumb
+# buffer entry points.
+#
+# librga 2.x allocates video buffers with DRM_IOCTL_MODE_CREATE_DUMB. This
+# board has no display-subsystem node, so the rockchip DRM master never
+# probes and the only DRM cards are panfrost and RKNPU, which do not
+# implement that ioctl - librga then segfaults on the NULL result. The
+# driver added here answers the ioctl against the kernel CMA area; it has
+# no crtc/modesetting and is only reached by userspace opening /dev/dri.
+patch_kernel_rga_dumb_driver()
+{
+	local src_dir="$PROJECT_DIR/patches-vpu"
+	local drv_src="$src_dir/rga-dumb-drv.c"
+	local drv_dst_dir="$KERNEL_SRC/drivers/gpu/drm/rockchip"
+	local kconfig="$drv_dst_dir/Kconfig"
+	local makefile="$drv_dst_dir/Makefile"
+	local dtsi="$KERNEL_SRC/arch/arm64/boot/dts/rockchip/rk3568.dtsi"
+	local defconfig="$KERNEL_SRC/arch/arm64/configs/$KERNEL_DEFCONFIG"
+	local marker="NBU_OEC_RGA_DUMB"
+
+	[ -f "$drv_src" ] || return 0
+
+	if grep -q "$marker" "$makefile" 2>/dev/null; then
+		log "rga dumb DRM driver already wired into the kernel tree"
+	else
+		log "adding CMA dumb-buffer DRM driver for librga"
+		cp -f "$drv_src" "$drv_dst_dir/rga-dumb-drv.c"
+		need_file "$drv_dst_dir/rga-dumb-drv.c" "failed to install rga-dumb-drv.c"
+
+		{
+			echo ""
+			echo "# $marker: CMA dumb buffer device for userspace librga"
+			echo "obj-\$(CONFIG_DRM_OEC_RGA_DUMB) += rga-dumb-drv.o"
+		} >> "$makefile"
+
+		{
+			echo ""
+			echo "# $marker"
+			echo "config DRM_OEC_RGA_DUMB"
+			echo "	tristate \"OEC RK3566 CMA dumb buffer DRM device\""
+			echo "	depends on DRM"
+			echo "	select DRM_GEM_CMA_HELPER"
+			echo "	help"
+			echo "	  Registers a DRM device that only implements the dumb buffer"
+			echo "	  entry points on top of the kernel CMA area. Userspace librga"
+			echo "	  needs DRM_IOCTL_MODE_CREATE_DUMB, which no other DRM device on"
+			echo "	  this board provides. Say M unless you know you need it."
+		} >> "$kconfig"
+
+		grep -q "$marker" "$makefile" || die "$makefile: failed to add rga dumb driver"
+		grep -q "$marker" "$kconfig" || die "$kconfig: failed to add DRM_OEC_RGA_DUMB"
+	fi
+
+	if grep -q '^CONFIG_DRM_OEC_RGA_DUMB=y' "$defconfig"; then
+		log "CONFIG_DRM_OEC_RGA_DUMB already enabled"
+	else
+		printf '\n# %s\nCONFIG_DRM_OEC_RGA_DUMB=y\n' "$marker" >> "$defconfig"
+		grep -q '^CONFIG_DRM_OEC_RGA_DUMB=y' "$defconfig" || die "$defconfig: failed to enable DRM_OEC_RGA_DUMB"
+	fi
+
+	# DTS node the platform driver binds to. No reg/clock/power-domain: the
+	# driver only needs a device to attach the DRM device to.
+	if [ -f "$dtsi" ] && ! grep -q "oec-rga-dumb" "$dtsi"; then
+		perl -0pi -e 's/(\trkvenc_opp_table: rkvenc-opp-table \{)/\toec_rga_dumb: oec-rga-dumb {\n\t\tcompatible = "rockchip,oec-rga-dumb";\n\t\tstatus = "okay";\n\t};\n\n$1/s' "$dtsi"
+		grep -q "oec-rga-dumb" "$dtsi" || die "$dtsi: failed to add oec-rga-dumb node"
+		log "added oec-rga-dumb device node to rk3568.dtsi"
+	fi
+}
+
 prune_stale_kernel_modules()
 {
 	local order="$KERNEL_BUILD/modules.order"
@@ -567,6 +694,12 @@ if [ "$PACK_ONLY" -eq 0 ]; then
 
 	ensure_cross_compile
 
+	# Config patches must run BEFORE configure_kernel_if_needed: that helper
+	# reruns "make <defconfig>" whenever the defconfig file is newer than the
+	# generated .config (which editing it always makes true), and that rerun
+	# would drop anything appended after the fact.
+	patch_kernel_multi_rga
+	patch_kernel_rga_dumb_driver
 	configure_kernel_if_needed
 	patch_kernel_disk_led
 	log "building kernel Image and dtb"
