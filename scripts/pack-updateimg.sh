@@ -385,10 +385,11 @@ static int sw_activity_by_ledtrig_disk_syno(struct ata_port* ap, u32 state)
 Err:
 	return ret;
 }
-#endif /* MY_ABC_HERE */
 NBU_ALT_EOF
 )"
-		perl -0pi -e 'BEGIN { $nb = pop; } s/static int sw_activity_by_ledtrig_disk_syno\(struct ata_port\* ap, u32 state\)\n\{.*?\n\}\n#endif \/\* MY_ABC_HERE \*\//$nb/s' "$ahci_c" "$alt_body"
+		# 7.4 renamed the guard comment (MY_ABC_HERE -> CONFIG_SYNO_*), so match
+		# any "#endif" line via lookahead and keep the original one.
+		perl -0pi -e 'BEGIN { $nb = pop; } s/static int sw_activity_by_ledtrig_disk_syno\(struct ata_port\* ap, u32 state\)\n\{.*?\n\}\n(?=#endif)/$nb\n/s' "$ahci_c" "$alt_body"
 		grep -q 'DT_HDD_ALT_LED' "$ahci_c" || die "$ahci_c: failed to patch dual-color blink"
 	fi
 
