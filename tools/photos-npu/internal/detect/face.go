@@ -1,6 +1,9 @@
 package detect
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 // Decode128x15 interprets a 128*128*15 face-detection map.
 // Official npu_server string order: confidance, y1, x1, y2, x2, landmarky, landmarkx...
@@ -120,4 +123,60 @@ func max32(a, b float32) float32 {
 }
 func min32(a, b float32) float32 {
 	return float32(math.Min(float64(a), float64(b)))
+}
+
+// Official npu_rtd1619b 112x112 alignment template.
+var refLandmarks = [5][2]float32{
+	{38.2946, 51.6963},
+	{73.5318, 51.5014},
+	{56.0252, 71.7366},
+	{41.5493, 92.3655},
+	{70.7299, 92.2041},
+}
+
+func FakeLandmarks(x1, y1, x2, y2 float32) (lx, ly []float32) {
+	w := x2 - x1
+	h := y2 - y1
+	lx = make([]float32, 5)
+	ly = make([]float32, 5)
+	for i, p := range refLandmarks {
+		lx[i] = x1 + p[0]/112*w
+		ly[i] = y1 + p[1]/112*h
+	}
+	return
+}
+
+func DecodeAuto(outs [][]float32, netW, netH int, scoreTh, iouTh float32) []Face {
+	if looksRetina(outs, netW, netH) {
+		return DecodeRetinaFace(outs, netW, netH, scoreTh, iouTh)
+	}
+	if looksUltra(outs) {
+		return DecodeUltraFace(outs, netW, netH, scoreTh, iouTh)
+	}
+	if len(outs) == 1 && len(outs[0]) >= 15*128*128 {
+		return Decode128x15(outs[0], netW, netH, scoreTh, iouTh)
+	}
+	if len(outs) == 2 {
+		return DecodeUltraFace(outs, netW, netH, scoreTh, iouTh)
+	}
+	if len(outs) >= 3 {
+		return DecodeRetinaFace(outs, netW, netH, scoreTh, iouTh)
+	}
+	return nil
+}
+
+func DecodeNamed(name string, outs [][]float32, netW, netH int, scoreTh, iouTh float32) []Face {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "retinaface", "retina":
+		return DecodeRetinaFace(outs, netW, netH, scoreTh, iouTh)
+	case "ultraface", "ultra":
+		return DecodeUltraFace(outs, netW, netH, scoreTh, iouTh)
+	case "map128x15", "128x15", "official":
+		if len(outs) == 0 {
+			return nil
+		}
+		return Decode128x15(outs[0], netW, netH, scoreTh, iouTh)
+	default:
+		return DecodeAuto(outs, netW, netH, scoreTh, iouTh)
+	}
 }

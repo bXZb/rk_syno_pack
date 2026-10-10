@@ -310,6 +310,8 @@ u-boot/                  Rockchip U-Boot 源码
 scripts/                 构建、PAT 和镜像脚本
 patches/                 initrd 补丁和 overlay
 tools/SynoXtract/        PAT 解包工具
+tools/photos-npu/        RK3566 Photos npu_server + SPK 打包
+.github/workflows/pack-photos-spk.yml  下载/解密/转 RKNN/打包 Photos SPK
 tools/linux_pack/        Rockchip update.img 打包工具
 tools/rkbin/             各 SoC/板卡的 rkbin 与分区描述
 build/                   中间产物和内核输出

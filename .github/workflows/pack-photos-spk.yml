@@ -7,10 +7,32 @@ on:
         description: Official Photos SPK version
         required: false
         default: '1.9.1-10928'
+  push:
+    paths:
+      - '.github/workflows/pack-photos-spk.yml'
+      - 'scripts/pack-photos-spk.sh'
+      - 'scripts/prepare-photos-rknn.sh'
+      - 'scripts/convert-photos-rknn.py'
+      - 'tools/photos-npu/**'
+  pull_request:
+    paths:
+      - '.github/workflows/pack-photos-spk.yml'
+      - 'scripts/pack-photos-spk.sh'
+      - 'scripts/prepare-photos-rknn.sh'
+      - 'scripts/convert-photos-rknn.py'
+      - 'tools/photos-npu/**'
+
+concurrency:
+  group: pack-photos-spk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pack:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PHOTOS_VERSION: ${{ github.event.inputs.photos_version || '1.9.1-10928' }}
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,46 +43,101 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install packer deps
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install packer + convert deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ libsodium-dev libmsgpack-dev xz-utils curl
+          sudo apt-get install -y g++ libsodium-dev libmsgpack-dev xz-utils curl unzip file git
 
       - name: Test npu_server
         working-directory: tools/photos-npu
-        env:
-          GOTOOLCHAIN: local
         run: go test ./...
+
+      - name: Download, decrypt, convert RKNN + librknnrt
+        run: |
+          chmod +x scripts/prepare-photos-rknn.sh scripts/pack-photos-spk.sh scripts/convert-photos-rknn.py
+          scripts/prepare-photos-rknn.sh \
+            --photos-version "${PHOTOS_VERSION}" \
+            --out-dir build/photos-rknn \
+            --install-deps
+          echo '--- rknn dir ---'
+          ls -lh build/photos-rknn
+          test -f build/photos-rknn/librknnrt.so
+          test -f build/photos-rknn/concept_network.rknn
+          test -f build/photos-rknn/detection_network.rknn
+          test -f build/photos-rknn/feature_network.rknn
+          file build/photos-rknn/librknnrt.so
 
       - name: Pack OEC Photos SPK
         run: |
-          chmod +x scripts/pack-photos-spk.sh
-          scripts/pack-photos-spk.sh --photos-version "${{ github.event.inputs.photos_version }}"
+          scripts/pack-photos-spk.sh \
+            --photos-version "${PHOTOS_VERSION}" \
+            --rknn-dir build/photos-rknn \
+            --require-rknn
 
-      - name: Show artifact
+      - name: Verify SPK is installable (unsigned tar + NPU bits)
         run: |
+          set -euo pipefail
           ls -lh output/dsm/SynologyPhotos-*-oec-npu.spk
-          tar -tf output/dsm/SynologyPhotos-*-oec-npu.spk
           python3 - <<'PY'
-          import tarfile, glob, io, lzma
+          import tarfile, glob, io, lzma, os
           spk = glob.glob("output/dsm/SynologyPhotos-*-oec-npu.spk")[0]
+          print("spk", spk, os.path.getsize(spk))
           with tarfile.open(spk) as t:
+              names = t.getnames()
+              print("spk members", names)
+              assert "INFO" in names and "package.tgz" in names
               info = t.extractfile("INFO").read().decode()
               print(info)
+              assert 'package="SynologyPhotos"' in info
+              assert 'arch="rtd1619b"' in info
               raw = t.extractfile("package.tgz").read()
           with tarfile.open(fileobj=io.BytesIO(lzma.decompress(raw))) as p:
-              names = p.getnames()
-          for n in names:
-              if "npu/" in n and n.count("/") < 4:
-                  print(n)
-          assert any(n.endswith("npu/npu_server") for n in names)
-          assert any(n.endswith("npu/OEC_NPU") for n in names)
-          assert any(n.endswith("scripts/oec-enable-npu.sh") for n in names)
-          print("SPK layout OK")
+              pkg = p.getnames()
+          wanted = [
+              "npu/npu_server",
+              "npu/OEC_NPU",
+              "npu/lib_arm64/librknnrt.so",
+              "npu/asset/network/concept_network.rknn",
+              "npu/asset/network/detection_network.rknn",
+              "npu/asset/network/feature_network.rknn",
+              "npu/npu_model_conf.json",
+          ]
+          for w in wanted:
+              assert any(n.endswith(w) for n in pkg), w
+          assert any(n.endswith("scripts/oec-enable-npu.sh") for n in names + pkg)
+          print("SPK layout OK (runtime + 3 RKNN models)")
           PY
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Synology Photos OEC NPU SPK"
+            echo
+            echo "Install on the DS124 / OECT box (unsigned sideload):"
+            echo
+            echo '```'
+            echo "synopkg install SynologyPhotos-rtd1619b-${PHOTOS_VERSION}-oec-npu.spk"
+            echo '```'
+            echo
+            if [ -f build/photos-rknn/MANIFEST.txt ]; then
+              echo "### Converted bits"
+              echo '```'
+              cat build/photos-rknn/MANIFEST.txt
+              echo '```'
+            fi
+            ls -lh output/dsm/SynologyPhotos-*-oec-npu.spk 2>/dev/null || true
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: synology-photos-oec-npu-spk
-          path: output/dsm/SynologyPhotos-*-oec-npu.spk
+          path: |
+            output/dsm/SynologyPhotos-*-oec-npu.spk
+            build/photos-rknn/MANIFEST.txt
           if-no-files-found: error
+          retention-days: 30

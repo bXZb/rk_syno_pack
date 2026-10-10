@@ -47,6 +47,11 @@ type Output struct {
 	_          uint32
 }
 
+type ioNum struct {
+	NInput  uint32
+	NOutput uint32
+}
+
 type Runtime struct {
 	mu      sync.Mutex
 	init    func(*Context, unsafe.Pointer, uint32, uint32, unsafe.Pointer) int32
@@ -55,6 +60,7 @@ type Runtime struct {
 	run     func(Context, unsafe.Pointer) int32
 	outGet  func(Context, uint32, unsafe.Pointer, unsafe.Pointer) int32
 	outRel  func(Context, uint32, unsafe.Pointer) int32
+	query   func(Context, uint32, unsafe.Pointer, uint32) int32
 }
 
 func Open(libPaths ...string) (*Runtime, error) {
@@ -86,6 +92,7 @@ func Open(libPaths ...string) (*Runtime, error) {
 		purego.RegisterLibFunc(&rt.run, lib, "rknn_run")
 		purego.RegisterLibFunc(&rt.outGet, lib, "rknn_outputs_get")
 		purego.RegisterLibFunc(&rt.outRel, lib, "rknn_outputs_release")
+		purego.RegisterLibFunc(&rt.query, lib, "rknn_query")
 		if rt.init == nil || rt.run == nil {
 			last = fmt.Errorf("librknnrt missing symbols in %s", p)
 			continue
@@ -121,6 +128,20 @@ func (rt *Runtime) Destroy(ctx Context) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.destroy(ctx)
+}
+
+// OutputCount uses rknn_query(RKNN_QUERY_IN_OUT_NUM). Returns 1 if query is unavailable.
+func (rt *Runtime) OutputCount(ctx Context) int {
+	if rt == nil || rt.query == nil || ctx == 0 {
+		return 1
+	}
+	var n ioNum
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rc := rt.query(ctx, 0, unsafe.Pointer(&n), uint32(unsafe.Sizeof(n))); rc != 0 || n.NOutput == 0 {
+		return 1
+	}
+	return int(n.NOutput)
 }
 
 func (rt *Runtime) InferFloat32(ctx Context, input []float32, nOut int) ([][]float32, error) {

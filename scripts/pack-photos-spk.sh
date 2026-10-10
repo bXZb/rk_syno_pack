@@ -12,6 +12,7 @@ Options:
   --spk PATH           Official SynologyPhotos-rtd1619b SPK (downloaded if omitted)
   --npu-server PATH    Prebuilt aarch64 npu_server (built if omitted)
   --rknn-dir DIR       Extra .rknn / librknnrt.so files copied into npu/
+  --require-rknn       Fail if librknnrt.so or the three .rknn models are missing
   --photos-version VER SPK version in the download URL (default 1.9.1-10928)
   --skip-build         Do not compile npu_server; require --npu-server
   --output PATH        Output SPK path
@@ -32,6 +33,7 @@ PHOTOS_VERSION="${PHOTOS_VERSION:-1.9.1-10928}"
 SPK_FILE=""
 NPU_SERVER=""
 RKNN_DIR=""
+REQUIRE_RKNN=0
 SKIP_BUILD=0
 OUTPUT=""
 
@@ -40,6 +42,7 @@ while [ "$#" -gt 0 ]; do
     --spk) SPK_FILE="$2"; shift 2 ;;
     --npu-server) NPU_SERVER="$2"; shift 2 ;;
     --rknn-dir) RKNN_DIR="$2"; shift 2 ;;
+    --require-rknn) REQUIRE_RKNN=1; shift ;;
     --photos-version) PHOTOS_VERSION="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --output) OUTPUT="$2"; shift 2 ;;
@@ -148,18 +151,21 @@ overlay_npu() {
   install -m 0644 "${NPU_DIR}/overlay/99-oec-galcore.rules" "${npu}/99-oec-galcore.rules"
   install -m 0644 "${NPU_DIR}/overlay/asset/labels.txt" "${npu}/asset/labels.txt"
   install -m 0644 "${NPU_DIR}/overlay/asset/thresholds.txt" "${npu}/asset/thresholds.txt"
+  install -m 0644 "${NPU_DIR}/overlay/npu_model_conf.json" "${npu}/npu_model_conf.json"
   printf 'oec-rknn\n' >"${npu}/asset/network/VERSION"
   printf 'rk3566 npu_server\n' >"${npu}/OEC_NPU"
 
   if [ -n "${RKNN_DIR}" ]; then
     [ -d "${RKNN_DIR}" ] || die "rknn dir not found: ${RKNN_DIR}"
     find "${RKNN_DIR}" -maxdepth 2 -type f \( \
-      -name '*.rknn' -o -name 'librknnrt.so*' -o -name 'labels.txt' -o -name 'thresholds.txt' \
+      -name '*.rknn' -o -name 'librknnrt.so*' -o -name 'labels.txt' \
+      -o -name 'thresholds.txt' -o -name 'npu_model_conf.json' \
     \) -print | while IFS= read -r f; do
       case "$(basename "$f")" in
         librknnrt.so*) install -m 0755 "$f" "${npu}/lib_arm64/$(basename "$f")" ;;
         *.rknn) install -m 0644 "$f" "${npu}/asset/network/$(basename "$f")" ;;
         labels.txt|thresholds.txt) install -m 0644 "$f" "${npu}/asset/$(basename "$f")" ;;
+        npu_model_conf.json) install -m 0644 "$f" "${npu}/npu_model_conf.json" ;;
       esac
     done
   fi
@@ -259,6 +265,13 @@ rm -f "${OUTPUT}"
   tar -cf "${OUTPUT}" INFO package.tgz scripts conf WIZARD_UIFILES PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG
 )
 
+has_rknn() {
+  local name="$1"
+  find "${PKG}/npu/asset/network" -maxdepth 1 -type f \( \
+    -name "${name}.rknn" -o -name "${name}_network.rknn" -o -name "${name}_fp16.rknn" \
+  \) | grep -q .
+}
+
 log "done: ${OUTPUT}"
 log "npu_server $(file -b "${PKG}/npu/npu_server")"
 log "package extractsize=${extract_kb} KiB"
@@ -267,4 +280,11 @@ if ! find "${PKG}/npu/asset/network" -name '*.rknn' | grep -q .; then
 fi
 if [ ! -e "${PKG}/npu/lib_arm64/librknnrt.so" ]; then
   log "note: librknnrt.so not packed; copy it into --rknn-dir for on-device inference"
+fi
+if [ "${REQUIRE_RKNN}" = 1 ]; then
+  [ -e "${PKG}/npu/lib_arm64/librknnrt.so" ] || die "--require-rknn: librknnrt.so missing"
+  has_rknn concept || die "--require-rknn: concept_network.rknn missing"
+  has_rknn detection || die "--require-rknn: detection_network.rknn missing"
+  has_rknn feature || die "--require-rknn: feature_network.rknn missing"
+  log "require-rknn: librknnrt.so + concept/detection/feature RKNN present"
 fi

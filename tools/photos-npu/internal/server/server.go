@@ -19,13 +19,15 @@ import (
 )
 
 type netCfg struct {
-	Reorder      bool      `json:"reorder"`
-	RGBMean      []float32 `json:"rgb_mean"`
-	RGBScale     float32   `json:"rgb_scale"`
-	NetSize      []int     `json:"net_size"`
-	ResultThres  float32   `json:"result_thres"`
-	IOUThres     float32   `json:"iou_thres"`
-	FeatureSize  any       `json:"feature_size"`
+	Reorder     bool      `json:"reorder"`
+	RGBMean     []float32 `json:"rgb_mean"`
+	RGBScale    float32   `json:"rgb_scale"`
+	NetSize     []int     `json:"net_size"`
+	ResultThres float32   `json:"result_thres"`
+	IOUThres    float32   `json:"iou_thres"`
+	FeatureSize any       `json:"feature_size"`
+	Fit         string    `json:"fit"`
+	Decode      string    `json:"decode"`
 }
 
 type modelConf struct {
@@ -102,7 +104,7 @@ func (m *Model) ExecCmd(_ context.Context, req *npupb.CmdRequest) (*npupb.CmdRep
 
 func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest) (*npupb.ConceptDetectReply, error) {
 	reply := &npupb.ConceptDetectReply{ReplyMap: map[string]*npupb.ConceptInfos{}}
-	scores, err := m.runNet("concept", req.GetBuffer(), m.conf.Concept, 1)
+	scores, _, err := m.runNet("concept", req.GetBuffer(), m.conf.Concept, 1)
 	if err != nil {
 		log.Printf("concept infer: %v", err)
 		return reply, nil
@@ -136,12 +138,7 @@ func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest)
 
 func (m *Model) FaceDetectBuffer(_ context.Context, req *npupb.BufferRequest) (*npupb.FaceDetectReply, error) {
 	rep := &npupb.FaceDetectReply{}
-	img, err := preprocess.DecodeImage(req.GetBuffer())
-	if err != nil {
-		log.Printf("face detect decode: %v", err)
-		return rep, nil
-	}
-	outs, err := m.runNet("detection", req.GetBuffer(), m.conf.Detection, 1)
+	outs, prep, err := m.runNet("detection", req.GetBuffer(), m.conf.Detection, 0)
 	if err != nil {
 		log.Printf("face detect infer: %v", err)
 		return rep, nil
@@ -149,14 +146,16 @@ func (m *Model) FaceDetectBuffer(_ context.Context, req *npupb.BufferRequest) (*
 	if len(outs) == 0 {
 		return rep, nil
 	}
-	b := img.Bounds()
-	faces := detect.Decode128x15(outs[0], b.Dx(), b.Dy(), m.conf.Detection.ResultThres, m.conf.Detection.IOUThres)
+	netW, netH := prep.Width, prep.Height
+	faces := detect.DecodeNamed(m.conf.Detection.Decode, outs, netW, netH, m.conf.Detection.ResultThres, m.conf.Detection.IOUThres)
 	for _, f := range faces {
+		x1, y1, x2, y2 := prep.MapBox(f.X1, f.Y1, f.X2, f.Y2)
+		lx, ly := prep.MapPoints(f.LX, f.LY)
 		rep.FaceInfo = append(rep.FaceInfo, &npupb.FaceInfo{
 			Bbox: &npupb.FaceRect{
-				X1: f.X1, Y1: f.Y1, X2: f.X2, Y2: f.Y2, Confidance: f.Score,
+				X1: x1, Y1: y1, X2: x2, Y2: y2, Confidance: f.Score,
 			},
-			Landmarks: &npupb.FaceLandmarks{X: f.LX, Y: f.LY},
+			Landmarks: &npupb.FaceLandmarks{X: lx, Y: ly},
 		})
 	}
 	return rep, nil
@@ -164,7 +163,7 @@ func (m *Model) FaceDetectBuffer(_ context.Context, req *npupb.BufferRequest) (*
 
 func (m *Model) FaceFeatureBuffer(_ context.Context, req *npupb.BufferRequest) (*npupb.FaceFeatureReply, error) {
 	rep := &npupb.FaceFeatureReply{}
-	outs, err := m.runNet("feature", req.GetBuffer(), m.conf.Feature, 1)
+	outs, _, err := m.runNet("feature", req.GetBuffer(), m.conf.Feature, 1)
 	if err != nil {
 		log.Printf("face feature infer: %v", err)
 		return rep, nil
@@ -182,37 +181,61 @@ func (m *Model) FaceFeatureBuffer(_ context.Context, req *npupb.BufferRequest) (
 	return rep, nil
 }
 
-func (m *Model) runNet(kind string, jpeg []byte, cfg netCfg, nOut int) ([][]float32, error) {
+func (m *Model) runNet(kind string, jpeg []byte, cfg netCfg, nOut int) ([][]float32, preprocess.Result, error) {
+	var prep preprocess.Result
 	if len(jpeg) == 0 {
-		return nil, nil
+		return nil, prep, nil
 	}
 	img, err := preprocess.DecodeImage(jpeg)
 	if err != nil {
-		return nil, err
+		return nil, prep, err
 	}
+	prep = preprocess.Prepare(img, toPrep(cfg))
+
+	m.ensureRKNN()
+	if m.rt == nil {
+		return nil, prep, m.rtErr
+	}
+	ctx, err := m.ctxFor(kind)
+	if err != nil || ctx == 0 {
+		return nil, prep, err
+	}
+	if nOut <= 0 {
+		nOut = m.rt.OutputCount(ctx)
+	}
+	if nOut <= 0 {
+		nOut = 1
+	}
+	outs, err := m.rt.InferFloat32(ctx, prep.Data, nOut)
+	return outs, prep, err
+}
+
+func toPrep(cfg netCfg) preprocess.Config {
 	w, h := 395, 395
 	if len(cfg.NetSize) >= 2 && cfg.NetSize[0] > 0 {
 		w, h = cfg.NetSize[0], cfg.NetSize[1]
 	}
 	mean := float32(127.5)
-	if len(cfg.RGBMean) > 0 {
+	var rgb []float32
+	if len(cfg.RGBMean) >= 3 {
+		rgb = cfg.RGBMean[:3]
+		mean = rgb[0]
+	} else if len(cfg.RGBMean) > 0 {
 		mean = cfg.RGBMean[0]
 	}
 	scale := cfg.RGBScale
 	if scale == 0 {
 		scale = 1.0 / 127.5
 	}
-	tensor := preprocess.NCHWFloat32(img, preprocess.Config{Width: w, Height: h, Mean: mean, Scale: scale})
-
-	m.ensureRKNN()
-	if m.rt == nil {
-		return nil, m.rtErr
+	return preprocess.Config{
+		Width:   w,
+		Height:  h,
+		Mean:    mean,
+		RGBMean: rgb,
+		Scale:   scale,
+		Reorder: cfg.Reorder,
+		Stretch: strings.EqualFold(cfg.Fit, "stretch"),
 	}
-	ctx, err := m.ctxFor(kind)
-	if err != nil || ctx == 0 {
-		return nil, err
-	}
-	return m.rt.InferFloat32(ctx, tensor, nOut)
 }
 
 func (m *Model) ensureRKNN() {
