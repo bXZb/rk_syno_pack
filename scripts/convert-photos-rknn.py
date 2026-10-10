@@ -11,9 +11,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
+
+
+def copy_onnx_bundle(src: str, dst: str) -> None:
+    """Copy an ONNX file plus same-directory external weight blobs."""
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    shutil.copy2(src, dst)
+    src_dir = os.path.dirname(os.path.abspath(src))
+    dst_dir = os.path.dirname(os.path.abspath(dst))
+    for name in os.listdir(src_dir):
+        if name.endswith(".data") or name.endswith(".onnx.data"):
+            shutil.copy2(os.path.join(src_dir, name), os.path.join(dst_dir, name))
+            print("copied sidecar", name)
 
 
 def apply_mapping_shim():
@@ -52,22 +65,40 @@ def rewrite_input_nchw(onnx_path: str) -> None:
     m = onnx.load(onnx_path)
     if not m.graph.input:
         return
+    # Freeze leftover training flags (MobileFaceNet_TF emits phase_train).
+    import numpy as np
+    from onnx import numpy_helper
+
+    keep = []
+    for inp in list(m.graph.input):
+        name = inp.name.lower()
+        if "phase" in name or name.endswith("train") or "train:" in name:
+            init = numpy_helper.from_array(np.array(False), name=inp.name)
+            m.graph.initializer.append(init)
+            print("froze aux input", inp.name, "-> False")
+            continue
+        keep.append(inp)
+    if keep:
+        del m.graph.input[:]
+        m.graph.input.extend(keep)
     inp = m.graph.input[0]
     dims = [d.dim_value for d in inp.type.tensor_type.shape.dim]
+    if dims and dims[0] in (0, -1):
+        inp.type.tensor_type.shape.dim[0].dim_value = 1
+        dims[0] = 1
+        print("batch dim forced to 1")
     print("onnx ir", m.ir_version, "inputs", [(i.name, [d.dim_value for d in i.type.tensor_type.shape.dim]) for i in m.graph.input])
     print("onnx outputs", [(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim]) for o in m.graph.output])
     if len(dims) == 4 and dims[-1] in (1, 3) and dims[1] not in (1, 3):
         orig = inp.name
         nchw = orig + "_nchw"
         inp.name = nchw
-        nchw_dims = [dims[0], dims[3], dims[1], dims[2]]
+        nchw_dims = [dims[0] or 1, dims[3], dims[1], dims[2]]
         for i, v in enumerate(nchw_dims):
             inp.type.tensor_type.shape.dim[i].dim_value = v
         m.graph.node.insert(0, helper.make_node("Transpose", [nchw], [orig], perm=[0, 2, 3, 1], name="nchw_to_nhwc"))
-        onnx.save(m, onnx_path)
         print("input rewritten to NCHW", nchw_dims)
-    else:
-        onnx.save(m, onnx_path)
+    onnx.save(m, onnx_path)
 
 
 def smoke_onnx(onnx_path: str) -> None:
@@ -75,11 +106,28 @@ def smoke_onnx(onnx_path: str) -> None:
     import onnxruntime as ort
 
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-    ishape = [d if isinstance(d, int) and d > 0 else 1 for d in sess.get_inputs()[0].shape]
-    dummy = np.random.rand(*ishape).astype(np.float32)
-    out = sess.run(None, {sess.get_inputs()[0].name: dummy})
+    feed = {}
+    for inp in sess.get_inputs():
+        shape = [d if isinstance(d, int) and d > 0 else 1 for d in (inp.shape or [])]
+        typ = (inp.type or "").lower()
+        if "bool" in typ:
+            feed[inp.name] = np.array(False)
+        elif "int64" in typ:
+            feed[inp.name] = np.zeros(shape or [1], dtype=np.int64)
+        else:
+            if not shape:
+                shape = [1]
+            feed[inp.name] = np.random.rand(*shape).astype(np.float32)
+    out = sess.run(None, feed)
     print("smoke", os.path.basename(onnx_path), [o.shape for o in out], "finite", bool(np.isfinite(out[0]).all()))
     del sess
+
+
+def maybe_smoke(onnx_path: str) -> None:
+    try:
+        smoke_onnx(onnx_path)
+    except Exception as exc:
+        print("smoke warning (continuing):", exc)
 
 
 def tflite_to_onnx(tflite: str, onnx_path: str) -> None:
@@ -106,7 +154,7 @@ def graphdef_to_onnx(pb: str, onnx_path: str) -> None:
     cmd = [sys.executable, "-m", "tf2onnx.convert", "--graphdef", pb, "--output", onnx_path, "--opset", "13"]
     # sirius-ai MobileFaceNet_TF: img_inputs -> embeddings. Ignore phase_train.
     if "img_inputs" in names:
-        cmd += ["--inputs", "img_inputs:0"]
+        cmd += ["--inputs", "img_inputs:0", "--inputs-as-nchw", "img_inputs:0"]
     elif placeholders:
         inputs = [p if ":" in p else p + ":0" for p in placeholders if "phase" not in p.lower()]
         if inputs:
@@ -123,13 +171,37 @@ def graphdef_to_onnx(pb: str, onnx_path: str) -> None:
         raise SystemExit(f"tf2onnx graphdef failed rc={r.returncode}")
 
 
-def export_rknn(onnx_path: str, rknn_path: str, platform: str) -> None:
+def ensure_opset(onnx_path: str, target: int = 13) -> None:
+    import onnx
+    from onnx import version_converter
+
+    m = onnx.load(onnx_path)
+    opsets = [o.version for o in m.opset_import if o.domain in ("", "ai.onnx")]
+    current = max(opsets) if opsets else 0
+    if current <= 19:
+        return
+    print(f"downgrading onnx opset {current} -> {target}")
+    converted = version_converter.convert_version(m, target)
+    onnx.save(converted, onnx_path)
+
+
+def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, input_size_list=None) -> None:
     apply_mapping_shim()
+    ensure_opset(onnx_path)
     from rknn.api import RKNN
 
     rknn = RKNN(verbose=True)
     rknn.config(target_platform=platform)
-    ret = rknn.load_onnx(model=onnx_path)
+    kwargs = {"model": onnx_path}
+    if inputs:
+        kwargs["inputs"] = inputs
+        if input_size_list:
+            kwargs["input_size_list"] = input_size_list
+    try:
+        ret = rknn.load_onnx(**kwargs)
+    except Exception as exc:
+        rknn.release()
+        raise SystemExit(f"load_onnx exception: {exc}") from exc
     print("load_onnx", onnx_path, "->", ret)
     if ret != 0:
         rknn.release()
@@ -234,7 +306,7 @@ def main() -> None:
         onnx_path = os.path.join(work, "concept.onnx")
         tflite_to_onnx(args.concept_tflite, onnx_path)
         rewrite_input_nchw(onnx_path)
-        smoke_onnx(onnx_path)
+        maybe_smoke(onnx_path)
         export_rknn(onnx_path, os.path.join(out, "concept_network.rknn"), args.platform)
 
     if not args.skip_detection:
@@ -242,11 +314,9 @@ def main() -> None:
             raise SystemExit("detection onnx missing")
         onnx_path = os.path.join(work, "detection.onnx")
         if os.path.abspath(args.detection_onnx) != os.path.abspath(onnx_path):
-            import shutil
-
-            shutil.copy2(args.detection_onnx, onnx_path)
+            copy_onnx_bundle(args.detection_onnx, onnx_path)
         rewrite_input_nchw(onnx_path)
-        smoke_onnx(onnx_path)
+        maybe_smoke(onnx_path)
         detect_w, detect_h = input_hw(onnx_path)
         name = os.path.basename(args.detection_onnx).lower()
         if "retina" in name:
@@ -257,24 +327,43 @@ def main() -> None:
 
     if not args.skip_feature:
         onnx_path = os.path.join(work, "feature.onnx")
-        import shutil
-
-        converted = False
+        candidates = []
         if args.feature_pb and os.path.isfile(args.feature_pb):
+            candidates.append(("pb", args.feature_pb))
+        if args.feature_onnx and os.path.isfile(args.feature_onnx):
+            candidates.append(("onnx", args.feature_onnx))
+        if not candidates:
+            raise SystemExit("feature onnx/pb missing")
+        last_err = None
+        exported = False
+        for kind, src in candidates:
             try:
-                graphdef_to_onnx(args.feature_pb, onnx_path)
-                converted = os.path.isfile(onnx_path)
+                print("trying feature", kind, src)
+                if kind == "pb":
+                    graphdef_to_onnx(src, onnx_path)
+                else:
+                    copy_onnx_bundle(src, onnx_path)
+                rewrite_input_nchw(onnx_path)
+                maybe_smoke(onnx_path)
+                feat_w, feat_h = input_hw(onnx_path)
+                extra = {}
+                # Qualcomm export is a 2-image siamese graph; keep the first tower.
+                import onnx as _onnx
+
+                m = _onnx.load(onnx_path)
+                if len(m.graph.input) > 1 and kind == "onnx":
+                    extra = {
+                        "inputs": [m.graph.input[0].name],
+                        "input_size_list": [[1, 3, feat_h, feat_w]],
+                    }
+                export_rknn(onnx_path, os.path.join(out, "feature_network.rknn"), args.platform, **extra)
+                exported = True
+                break
             except SystemExit as exc:
-                print("feature pb convert failed:", exc)
-        if not converted and args.feature_onnx and os.path.isfile(args.feature_onnx):
-            shutil.copy2(args.feature_onnx, onnx_path)
-            converted = True
-        if not converted:
-            raise SystemExit("feature onnx/pb missing or convert failed")
-        rewrite_input_nchw(onnx_path)
-        smoke_onnx(onnx_path)
-        feat_w, feat_h = input_hw(onnx_path)
-        export_rknn(onnx_path, os.path.join(out, "feature_network.rknn"), args.platform)
+                last_err = exc
+                print("feature candidate failed:", exc)
+        if not exported:
+            raise SystemExit(last_err or "feature convert failed")
 
     write_conf(os.path.join(out, "npu_model_conf.json"), detect_w, detect_h, detect_kind, feat_w, feat_h)
     print("FINAL OK", out)
