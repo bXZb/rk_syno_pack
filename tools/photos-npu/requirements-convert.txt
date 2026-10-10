@@ -1,6 +1,8 @@
-# Host-side conversion deps for scripts/convert-photos-rknn.py
-# rknn-toolkit2 2.3.2 wheel is installed separately (CPython 3.8-3.12).
-# CI uses 3.10 + the pins below (same as the proven convert-concept workflow).
+# Reference pins for scripts/prepare-photos-rknn.sh --install-deps.
+# Do not pip install -r this file in one shot: tensorflow-cpu 2.15,
+# tf2onnx, onnxruntime and protobuf do not resolve together.
+# The script installs them in the same order as convert-concept.yml.
+# rknn-toolkit2 2.3.2 is installed separately (--no-deps).
 numpy==1.26.4
 psutil
 ruamel.yaml

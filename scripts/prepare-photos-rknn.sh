@@ -217,8 +217,14 @@ if sys.version_info < (3, 8) or sys.version_info >= (3, 13):
     raise SystemExit(f"rknn-toolkit2 2.3.2 supports CPython 3.8-3.12, got {sys.version}")
 print("python", sys.version)
 PY
-  pip install --quiet -r "${PROJECT_DIR}/tools/photos-npu/requirements-convert.txt"
+  # Sequential pins match .github/workflows/convert-concept.yml.
+  # A single pip -r of requirements-convert.txt fails the resolver
+  # (tensorflow-cpu 2.15 / tf2onnx / onnxruntime / protobuf).
+  pip install --quiet "numpy==1.26.4" psutil "ruamel.yaml" scipy tqdm opencv-python fast-histogram
+  pip install --quiet "onnx==1.16.1" "onnxruntime==1.16.3" "protobuf==4.25.4"
+  pip install --quiet "tensorflow-cpu==2.15.1" "tf2onnx==1.16.1"
   pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+  pip install --quiet "protobuf==4.25.4" "numpy==1.26.4"
   mkdir -p "${WORK}/whl"
   pip download "rknn-toolkit2==${RKNN_TOOLKIT_VER}" --no-deps -d "${WORK}/whl"
   WHL="$(ls "${WORK}/whl"/rknn_toolkit2-*.whl | head -n1)"
