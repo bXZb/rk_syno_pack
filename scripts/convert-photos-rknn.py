@@ -70,12 +70,15 @@ def rewrite_input_nchw(onnx_path: str) -> None:
     from onnx import numpy_helper
 
     keep = []
+    init_names = {i.name for i in m.graph.initializer}
     for inp in list(m.graph.input):
         name = inp.name.lower()
         if "phase" in name or name.endswith("train") or "train:" in name:
-            init = numpy_helper.from_array(np.array(False), name=inp.name)
-            m.graph.initializer.append(init)
-            print("froze aux input", inp.name, "-> False")
+            if inp.name not in init_names:
+                m.graph.initializer.append(numpy_helper.from_array(np.array(False), name=inp.name))
+                print("froze aux input", inp.name, "-> False")
+            else:
+                print("dropped aux input", inp.name, "(initializer exists)")
             continue
         keep.append(inp)
     if keep:
@@ -171,7 +174,7 @@ def graphdef_to_onnx(pb: str, onnx_path: str) -> None:
         raise SystemExit(f"tf2onnx graphdef failed rc={r.returncode}")
 
 
-def ensure_opset(onnx_path: str, target: int = 13) -> None:
+def ensure_opset(onnx_path: str, target: int = 19) -> None:
     import onnx
     from onnx import version_converter
 
@@ -183,6 +186,36 @@ def ensure_opset(onnx_path: str, target: int = 13) -> None:
     print(f"downgrading onnx opset {current} -> {target}")
     converted = version_converter.convert_version(m, target)
     onnx.save(converted, onnx_path)
+
+
+def fold_to_single_input(onnx_path: str) -> None:
+    """Qualcomm MobileFaceNet is a 2-tower siamese graph. Keep one 112x112 input."""
+    import onnx
+    from onnx import helper, TensorProto
+
+    m = onnx.load(onnx_path)
+    if len(m.graph.input) <= 1:
+        return
+    keep = m.graph.input[0].name
+    drop = [i.name for i in m.graph.input[1:]]
+    print("folding extra inputs", drop, "->", keep)
+    for node in m.graph.node:
+        for i, inp in enumerate(list(node.input)):
+            if inp in drop:
+                node.input[i] = keep
+    del m.graph.input[1:]
+    out = m.graph.output[0]
+    dims = [d.dim_value for d in out.type.tensor_type.shape.dim]
+    if len(dims) >= 1 and dims[0] == 2:
+        orig = out.name
+        sliced = orig + "_one"
+        for name, arr in (("slice_starts", [0]), ("slice_ends", [1]), ("slice_axes", [0])):
+            m.graph.initializer.append(helper.make_tensor(name, TensorProto.INT64, [1], arr))
+        m.graph.node.append(helper.make_node("Slice", [orig, "slice_starts", "slice_ends", "slice_axes"], [sliced], name="take_first_emb"))
+        out.name = sliced
+        out.type.tensor_type.shape.dim[0].dim_value = 1
+        print("sliced embedding", dims, "-> [1, ...]")
+    onnx.save(m, onnx_path)
 
 
 def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, input_size_list=None) -> None:
@@ -206,7 +239,11 @@ def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, inpu
     if ret != 0:
         rknn.release()
         raise SystemExit(f"load_onnx failed: {onnx_path}")
-    ret = rknn.build(do_quantization=False)
+    try:
+        ret = rknn.build(do_quantization=False)
+    except Exception as exc:
+        rknn.release()
+        raise SystemExit(f"build exception: {exc}") from exc
     print("build ->", ret)
     if ret != 0:
         rknn.release()
@@ -328,10 +365,10 @@ def main() -> None:
     if not args.skip_feature:
         onnx_path = os.path.join(work, "feature.onnx")
         candidates = []
-        if args.feature_pb and os.path.isfile(args.feature_pb):
-            candidates.append(("pb", args.feature_pb))
         if args.feature_onnx and os.path.isfile(args.feature_onnx):
             candidates.append(("onnx", args.feature_onnx))
+        if args.feature_pb and os.path.isfile(args.feature_pb):
+            candidates.append(("pb", args.feature_pb))
         if not candidates:
             raise SystemExit("feature onnx/pb missing")
         last_err = None
@@ -343,23 +380,15 @@ def main() -> None:
                     graphdef_to_onnx(src, onnx_path)
                 else:
                     copy_onnx_bundle(src, onnx_path)
+                    ensure_opset(onnx_path, target=19)
+                    fold_to_single_input(onnx_path)
                 rewrite_input_nchw(onnx_path)
                 maybe_smoke(onnx_path)
                 feat_w, feat_h = input_hw(onnx_path)
-                extra = {}
-                # Qualcomm export is a 2-image siamese graph; keep the first tower.
-                import onnx as _onnx
-
-                m = _onnx.load(onnx_path)
-                if len(m.graph.input) > 1 and kind == "onnx":
-                    extra = {
-                        "inputs": [m.graph.input[0].name],
-                        "input_size_list": [[1, 3, feat_h, feat_w]],
-                    }
-                export_rknn(onnx_path, os.path.join(out, "feature_network.rknn"), args.platform, **extra)
+                export_rknn(onnx_path, os.path.join(out, "feature_network.rknn"), args.platform)
                 exported = True
                 break
-            except SystemExit as exc:
+            except Exception as exc:
                 last_err = exc
                 print("feature candidate failed:", exc)
         if not exported:
