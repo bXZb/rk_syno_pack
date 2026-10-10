@@ -13,7 +13,7 @@ Options:
   --photos-version VER   Official Photos version (default 1.9.1-10928)
   --x86-spk PATH         Pre-downloaded x86_64 Photos SPK
   --platform NAME        RKNN target_platform (default rk3566)
-  --install-deps         Install Python conversion deps (needs CPython 3.10)
+  --install-deps         Install Python conversion deps (CPython 3.8-3.12)
   --skip-convert         Only download/extract; do not run rknn-toolkit2
   --skip-concept|--skip-detection|--skip-feature
   -h, --help
@@ -194,13 +194,16 @@ fetch_face_models() {
       && [ "$(stat -c%s "${WORK}/MobileFaceNet_9925_9680.pb")" -gt 1000000 ]; then
       FEATURE_PB="${WORK}/MobileFaceNet_9925_9680.pb"
       log "feature=MobileFaceNet_9925_9680.pb"
-    elif download "${WORK}/mobile_facenet-onnx-float.zip" "${FEATURE_ONNX_URLS[@]}"; then
+    fi
+    if download "${WORK}/mobile_facenet-onnx-float.zip" "${FEATURE_ONNX_URLS[@]}"; then
       mkdir -p "${WORK}/mfn"
       unzip -o -q "${WORK}/mobile_facenet-onnx-float.zip" -d "${WORK}/mfn"
       FEATURE_ONNX="$(find "${WORK}/mfn" -name '*.onnx' | head -n1 || true)"
-      [ -n "${FEATURE_ONNX}" ] || die "qualcomm zip had no onnx"
-      log "feature=$(basename "${FEATURE_ONNX}")"
-    else
+      if [ -n "${FEATURE_ONNX}" ]; then
+        log "feature-onnx=$(basename "${FEATURE_ONNX}")"
+      fi
+    fi
+    if [ -z "${FEATURE_PB}" ] && [ -z "${FEATURE_ONNX}" ]; then
       die "could not download MobileFaceNet"
     fi
   fi
@@ -210,15 +213,18 @@ install_python_deps() {
   need_cmd python3
   python3 - <<'PY'
 import sys
-if sys.version_info[:2] != (3, 10):
-    raise SystemExit(f"rknn-toolkit2 2.3.2 CI wheel expects CPython 3.10, got {sys.version}")
+if sys.version_info < (3, 8) or sys.version_info >= (3, 13):
+    raise SystemExit(f"rknn-toolkit2 2.3.2 supports CPython 3.8-3.12, got {sys.version}")
+print("python", sys.version)
 PY
   pip install --quiet -r "${PROJECT_DIR}/tools/photos-npu/requirements-convert.txt"
   pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
   mkdir -p "${WORK}/whl"
   pip download "rknn-toolkit2==${RKNN_TOOLKIT_VER}" --no-deps -d "${WORK}/whl"
-  pip install --quiet --no-deps "${WORK}/whl"/rknn_toolkit2-"${RKNN_TOOLKIT_VER}"-cp310-*.whl
-  python3 -c "from rknn.api import RKNN; print('rknn api ok')"
+  WHL="$(ls "${WORK}/whl"/rknn_toolkit2-*.whl | head -n1)"
+  [ -n "${WHL}" ] || die "rknn-toolkit2 wheel not downloaded"
+  pip install --quiet --no-deps "${WHL}"
+  python3 -c "from rknn.api import RKNN; print('rknn api ok', '${WHL}')"
 }
 
 run_convert() {

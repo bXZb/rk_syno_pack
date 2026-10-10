@@ -104,11 +104,13 @@ def graphdef_to_onnx(pb: str, onnx_path: str) -> None:
     placeholders = [n.name for n in gd.node if n.op == "Placeholder"]
     print("graphdef placeholders", placeholders, "nodes", len(names))
     cmd = [sys.executable, "-m", "tf2onnx.convert", "--graphdef", pb, "--output", onnx_path, "--opset", "13"]
-    if placeholders:
-        # MobileFaceNet_TF uses img_inputs; add :0 if needed
-        inputs = [p if ":" in p else p + ":0" for p in placeholders]
-        cmd += ["--inputs", ",".join(inputs)]
-    # Prefer common embedding output names when present.
+    # sirius-ai MobileFaceNet_TF: img_inputs -> embeddings. Ignore phase_train.
+    if "img_inputs" in names:
+        cmd += ["--inputs", "img_inputs:0"]
+    elif placeholders:
+        inputs = [p if ":" in p else p + ":0" for p in placeholders if "phase" not in p.lower()]
+        if inputs:
+            cmd += ["--inputs", ",".join(inputs)]
     for cand in ("embeddings:0", "embeddings", "output:0", "output", "Bottleneck_BatchNorm:0"):
         base = cand.split(":")[0]
         if base in names or cand in names:
@@ -255,14 +257,20 @@ def main() -> None:
 
     if not args.skip_feature:
         onnx_path = os.path.join(work, "feature.onnx")
-        if args.feature_onnx and os.path.isfile(args.feature_onnx):
-            import shutil
+        import shutil
 
+        converted = False
+        if args.feature_pb and os.path.isfile(args.feature_pb):
+            try:
+                graphdef_to_onnx(args.feature_pb, onnx_path)
+                converted = os.path.isfile(onnx_path)
+            except SystemExit as exc:
+                print("feature pb convert failed:", exc)
+        if not converted and args.feature_onnx and os.path.isfile(args.feature_onnx):
             shutil.copy2(args.feature_onnx, onnx_path)
-        elif args.feature_pb and os.path.isfile(args.feature_pb):
-            graphdef_to_onnx(args.feature_pb, onnx_path)
-        else:
-            raise SystemExit("feature onnx/pb missing")
+            converted = True
+        if not converted:
+            raise SystemExit("feature onnx/pb missing or convert failed")
         rewrite_input_nchw(onnx_path)
         smoke_onnx(onnx_path)
         feat_w, feat_h = input_hw(onnx_path)

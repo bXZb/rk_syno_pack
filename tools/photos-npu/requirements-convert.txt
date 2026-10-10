@@ -1,5 +1,6 @@
 # Host-side conversion deps for scripts/convert-photos-rknn.py
-# (rknn-toolkit2 2.3.2 wheel is installed separately; needs CPython 3.10).
+# rknn-toolkit2 2.3.2 wheel is installed separately (CPython 3.8-3.12).
+# CI uses 3.10 + the pins below (same as the proven convert-concept workflow).
 numpy==1.26.4
 psutil
 ruamel.yaml
