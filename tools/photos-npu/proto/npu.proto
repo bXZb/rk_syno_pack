@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package npu;
+
+option go_package = "github.com/bXZb/rk_syno_pack/tools/photos-npu/internal/npupb";
+
+// Reconstructed from Synology Photos rtd1619b npu_server / plugin
+// FileDescriptorProtos (concept.proto, face.proto, common.proto).
+
+message ConceptInfos {
+  repeated float info = 1;
+}
+
+message ConceptDetectReply {
+  map<string, ConceptInfos> reply_map = 1;
+}
+
+message FaceFeatureReply {
+  repeated float face_feature = 1;
+  float feature_score = 2;
+}
+
+message FaceRect {
+  float x1 = 1;
+  float y1 = 2;
+  float x2 = 3;
+  float y2 = 4;
+  float confidance = 5; // original spelling
+}
+
+message FaceLandmarks {
+  repeated float x = 1;
+  repeated float y = 2;
+}
+
+message FaceInfo {
+  FaceRect bbox = 1;
+  FaceLandmarks landmarks = 2;
+}
+
+message FaceDetectReply {
+  repeated FaceInfo face_info = 1;
+}
+
+message CmdRequest {
+  string name = 1;
+}
+
+message CmdReply {
+  string result = 1;
+}
+
+message BufferRequest {
+  bytes buffer = 1;
+}
+
+service Model {
+  rpc FaceDetectBuffer(BufferRequest) returns (FaceDetectReply);
+  rpc FaceFeatureBuffer(BufferRequest) returns (FaceFeatureReply);
+  rpc ConceptDetectBuffer(BufferRequest) returns (ConceptDetectReply);
+  rpc ExecCmd(CmdRequest) returns (CmdReply);
+}

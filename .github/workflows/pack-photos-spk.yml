@@ -1,0 +1,66 @@
+name: Pack Synology Photos OEC NPU SPK
+
+on:
+  workflow_dispatch:
+    inputs:
+      photos_version:
+        description: Official Photos SPK version
+        required: false
+        default: '1.9.1-10928'
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install packer deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libsodium-dev libmsgpack-dev xz-utils curl
+
+      - name: Test npu_server
+        working-directory: tools/photos-npu
+        env:
+          GOTOOLCHAIN: local
+        run: go test ./...
+
+      - name: Pack OEC Photos SPK
+        run: |
+          chmod +x scripts/pack-photos-spk.sh
+          scripts/pack-photos-spk.sh --photos-version "${{ github.event.inputs.photos_version }}"
+
+      - name: Show artifact
+        run: |
+          ls -lh output/dsm/SynologyPhotos-*-oec-npu.spk
+          tar -tf output/dsm/SynologyPhotos-*-oec-npu.spk
+          python3 - <<'PY'
+          import tarfile, glob, io, lzma
+          spk = glob.glob("output/dsm/SynologyPhotos-*-oec-npu.spk")[0]
+          with tarfile.open(spk) as t:
+              info = t.extractfile("INFO").read().decode()
+              print(info)
+              raw = t.extractfile("package.tgz").read()
+          with tarfile.open(fileobj=io.BytesIO(lzma.decompress(raw))) as p:
+              names = p.getnames()
+          for n in names:
+              if "npu/" in n and n.count("/") < 4:
+                  print(n)
+          assert any(n.endswith("npu/npu_server") for n in names)
+          assert any(n.endswith("npu/OEC_NPU") for n in names)
+          assert any(n.endswith("scripts/oec-enable-npu.sh") for n in names)
+          print("SPK layout OK")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synology-photos-oec-npu-spk
+          path: output/dsm/SynologyPhotos-*-oec-npu.spk
+          if-no-files-found: error

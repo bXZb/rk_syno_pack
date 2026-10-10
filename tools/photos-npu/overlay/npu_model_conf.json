@@ -1,0 +1,35 @@
+{
+  "detection": {
+    "reorder": true,
+    "rgb_mean": [127.5, 127.5, 127.5],
+    "rgb_scale": 0.0078125,
+    "net_size": [512, 512, 3],
+    "result_thres": 0.5,
+    "feature_size": {
+      "value": 245760,
+      "_comment": "128 * 128 * 15"
+    },
+    "norm_scale": -1,
+    "iou_thres": 0.5
+  },
+  "feature": {
+    "reorder": true,
+    "rgb_mean": [127.5, 127.5, 127.5],
+    "rgb_scale": 0.0078125,
+    "net_size": [112, 112, 3],
+    "result_thres": -1,
+    "feature_size": 128,
+    "norm_scale": 100,
+    "iou_thres": -1
+  },
+  "concept": {
+    "reorder": true,
+    "rgb_mean": [127.5, 127.5, 127.5],
+    "rgb_scale": 0.00784313725,
+    "net_size": [395, 395, 3],
+    "result_thres": -1,
+    "feature_size": 335,
+    "norm_scale": -1,
+    "iou_thres": -1
+  }
+}
