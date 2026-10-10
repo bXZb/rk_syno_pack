@@ -1,0 +1,17 @@
+# Reference pins for scripts/prepare-photos-rknn.sh --install-deps.
+# Do not pip install -r this file in one shot: tensorflow-cpu 2.15,
+# tf2onnx, onnxruntime and protobuf do not resolve together.
+# The script installs them in the same order as convert-concept.yml.
+# rknn-toolkit2 2.3.2 is installed separately (--no-deps).
+numpy==1.26.4
+psutil
+ruamel.yaml
+scipy
+tqdm
+opencv-python
+fast-histogram
+onnx==1.16.1
+onnxruntime==1.16.3
+protobuf==4.25.4
+tensorflow-cpu==2.15.1
+tf2onnx==1.16.1
