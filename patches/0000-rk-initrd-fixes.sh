@@ -125,9 +125,21 @@ sync_synoinfo_disk_count()
 	done
 }
 
+disable_disk_compatibility()
+{
+	dir="$1"
+
+	[ -d "$RootMnt/$dir" ] || return 0
+	[ -f "$RootMnt/$dir/synoinfo.conf" ] || return 0
+
+	set_synoinfo_kv "$RootMnt/$dir/synoinfo.conf" support_disk_compatibility no
+}
+
 copy_model_dtb etc.defaults
 copy_model_dtb etc
 sync_synoinfo_disk_count
+disable_disk_compatibility etc.defaults
+disable_disk_compatibility etc
 EOF
 	chmod 0755 "$script"
 
