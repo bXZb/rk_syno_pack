@@ -1,5 +1,8 @@
 name: Convert Concept TFLite to RKNN
 
+# Prefer .github/workflows/pack-photos-spk.yml — it converts concept + face
+# models, fetches librknnrt.so, and emits the installable Photos SPK.
+
 on:
   workflow_dispatch:
 
