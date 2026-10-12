@@ -1,5 +1,7 @@
 build/
 output/
+__pycache__/
+*.pyc
 u-boot/bl31_0x00040000.bin.gz
 u-boot/tee.bin.gz
 *.o

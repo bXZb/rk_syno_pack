@@ -1,0 +1,4 @@
+# Photos IsSupportedNpuNetwork() only stats /dev/galcore.
+# The real RK3566 node is /dev/rknpu (and the rknpu DRM card).
+KERNEL=="rknpu", MODE="0666", SYMLINK+="galcore"
+ACTION=="add", DEVPATH=="*rknpu*", RUN+="/bin/ln -sf /dev/rknpu /dev/galcore"
