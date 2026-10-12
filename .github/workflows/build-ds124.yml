@@ -35,6 +35,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # DS124 is a single-bay model. The patched rd's model.dtb slot count and
+      # the maxdisks keys both derive from SYNO_MAX_DISKS, and the initrd's
+      # model-sync hook re-applies them to the installed system on EVERY boot
+      # (the patched rd doubles as the boot initrd), so the initrd contents
+      # define the system's persistent state. 6 slots on a 1-bay box leaves
+      # Storage Manager unable to offer the disk for pool creation.
+      SYNO_MAX_DISKS: "1"
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
