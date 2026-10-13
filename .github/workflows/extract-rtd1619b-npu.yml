@@ -1,0 +1,59 @@
+name: Extract Official rtd1619b NPU Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      photos_version:
+        description: Official Photos SPK version
+        required: false
+        default: '1.9.1-10928'
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libsodium-dev curl xxd
+
+      - name: Build SynoXtract
+        run: |
+          g++ -O2 -std=c++17 -o tools/SynoXtract/synoxtract tools/SynoXtract/main.cpp -lsodium
+
+      - name: Download and decrypt official rtd1619b SPK
+        run: |
+          set -euo pipefail
+          V="${{ github.event.inputs.photos_version || '1.9.1-10928' }}"
+          curl -L --fail -o official.spk "https://global.synologydownload.com/download/Package/spk/SynologyPhotos/${V}/SynologyPhotos-rtd1619b-${V}.spk"
+          mkdir -p outx out
+          ./tools/SynoXtract/synoxtract -i official.spk -d outx
+          echo "=== package.tgz magic ==="
+          xxd -l 16 outx/package.tgz
+          tar xf outx/package.tgz -C out 2>/dev/null || tar xJf outx/package.tgz -C out || tar xjf outx/package.tgz -C out
+          echo "=== npu tree ==="
+          find out -path '*npu*' -type f | head -40
+
+      - name: Collect npu assets
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          find out -type d -name npu | while read -r d; do
+            rel="${d#out/}"
+            mkdir -p "assets/$(dirname "$rel")"
+            cp -r "$d" "assets/$rel"
+          done
+          find assets -type f -exec md5sum {} \;
+          du -sh assets
+
+      - name: Upload official npu assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-rtd1619b-npu
+          path: assets/
+          if-no-files-found: error
