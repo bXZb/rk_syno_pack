@@ -228,8 +228,8 @@ def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, inpu
     rknn = RKNN(verbose=True)
     if quant:
         rknn.config(target_platform=platform,
-                    mean_values="127.5 127.5 127.5",
-                    std_values="127.5 127.5 127.5")
+                    mean_values=[[127.5, 127.5, 127.5]],
+                    std_values=[[127.5, 127.5, 127.5]])
     else:
         rknn.config(target_platform=platform)
     kwargs = {"model": onnx_path}
