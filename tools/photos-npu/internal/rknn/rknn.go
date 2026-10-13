@@ -25,16 +25,18 @@ const (
 	TensorNHWC    = 1
 )
 
-// Layout matches rknn_api.h on aarch64/x86_64 (24-byte structs).
+// Layout matches rknn_api.h on aarch64/x86_64. rknn_tensor_type and
+// rknn_tensor_format are C enums (int, 4 bytes), so rknn_input is 32
+// bytes: index@0 buf@8 size@16 pass_through@20 type@24 fmt@28.
 type Input struct {
 	Index       uint32
 	_           uint32
 	Buf         unsafe.Pointer
 	Size        uint32
 	PassThrough uint8
-	Type        uint8
-	Fmt         uint8
-	_pad        uint8
+	_           [3]uint8
+	Type        uint32
+	Fmt         uint32
 }
 
 type Output struct {
