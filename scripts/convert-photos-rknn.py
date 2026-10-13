@@ -363,7 +363,7 @@ def main() -> None:
                 dataset = os.path.join(work, "calib.txt")
                 with open(dataset, "w") as f:
                     for name in imgs:
-                        f.write(os.path.abspath(os.path.join(args.calib_dir, name)) + NL)
+                        f.write(os.path.abspath(os.path.join(args.calib_dir, name)) + chr(10))
                 print("calibration images:", len(imgs))
         export_rknn(onnx_path, os.path.join(out, "concept_network.rknn"), args.platform,
                     quant=bool(dataset), dataset=dataset)
