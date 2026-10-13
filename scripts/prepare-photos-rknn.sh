@@ -238,6 +238,7 @@ run_convert() {
     python3 "${PROJECT_DIR}/scripts/convert-photos-rknn.py"
     --out-dir "${OUT_DIR}"
     --platform "${PLATFORM}"
+    "${CONVERT_CALIB_ARGS[@]}"
   )
   if [ "${SKIP_CONCEPT}" = 1 ]; then
     args+=(--skip-concept)
@@ -288,6 +289,25 @@ fi
 if [ "${SKIP_CONVERT}" = 1 ]; then
   log "skip convert; bits in ${OUT_DIR} / ${WORK}"
   exit 0
+fi
+
+mkdir -p "${OUT_DIR}/_calib"
+CALIB_COUNT=0
+# rtd1619b SPK test image (closest to the real domain) + SDK example photos
+if [ -n "${RTD_DIR:-}" ] && [ -f "${RTD_DIR}/npu/asset/images/test_concept.jpg" ]; then
+  cp "${RTD_DIR}/npu/asset/images/test_concept.jpg" "${OUT_DIR}/_calib/" || true
+fi
+TKT_BASE="https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknpu2/examples"
+for u in   "rknn_mobilenet_demo/model/cat_224x224.jpg"   "rknn_mobilenet_demo/model/dog_224x224.jpg"   "rknn_yolov5_demo/model/bus.jpg"   "rknn_yolov5_demo/model/zidane.jpg"; do
+  curl -sSfL --max-time 60 -o "${OUT_DIR}/_calib/$(basename "${u}")" "${TKT_BASE}/${u}" || true
+done
+CALIB_COUNT=$(ls "${OUT_DIR}/_calib" 2>/dev/null | grep -ciE '\.(jpg|jpeg|png)$' || true)
+log "calibration images: ${CALIB_COUNT}"
+if [ "${CALIB_COUNT}" -ge 2 ]; then
+  CONVERT_CALIB_ARGS=(--calib-dir "${OUT_DIR}/_calib")
+else
+  log "WARNING: not enough calibration images; concept stays unquantized"
+  CONVERT_CALIB_ARGS=()
 fi
 
 run_convert
