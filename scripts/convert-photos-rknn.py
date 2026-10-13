@@ -246,7 +246,7 @@ def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, inpu
     if ret != 0:
         rknn.release()
         raise SystemExit(f"load_onnx failed: {onnx_path}")
-    build_kwargs = {}
+    build_kwargs = {"do_quantization": False}
     if quant:
         build_kwargs = {"do_quantization": True, "dataset": dataset}
     try:
