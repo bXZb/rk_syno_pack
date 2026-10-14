@@ -238,6 +238,7 @@ run_convert() {
     python3 "${PROJECT_DIR}/scripts/convert-photos-rknn.py"
     --out-dir "${OUT_DIR}"
     --platform "${PLATFORM}"
+    "${CONVERT_CALIB_ARGS[@]}"
   )
   if [ "${SKIP_CONCEPT}" = 1 ]; then
     args+=(--skip-concept)
@@ -288,6 +289,58 @@ fi
 if [ "${SKIP_CONVERT}" = 1 ]; then
   log "skip convert; bits in ${OUT_DIR} / ${WORK}"
   exit 0
+fi
+
+mkdir -p "${OUT_DIR}/_calib"
+CALIB_COUNT=0
+# rtd1619b SPK test image (closest to the real domain) + SDK example photos
+if [ -n "${RTD_DIR:-}" ] && [ -f "${RTD_DIR}/npu/asset/images/test_concept.jpg" ]; then
+  cp "${RTD_DIR}/npu/asset/images/test_concept.jpg" "${OUT_DIR}/_calib/" || true
+fi
+TKT_BASE="https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknpu2/examples"
+for u in   "rknn_mobilenet_demo/model/cat_224x224.jpg"   "rknn_mobilenet_demo/model/dog_224x224.jpg"   "rknn_yolov5_demo/model/bus.jpg"   "rknn_yolov5_demo/model/zidane.jpg"; do
+  curl -sSfL --max-time 60 -o "${OUT_DIR}/_calib/$(basename "${u}")" "${TKT_BASE}/${u}" || true
+done
+# diverse real-scene calibration photos (OpenCV samples; 3 SDK images are
+# far too narrow: every concept score lands far below per-class thresholds)
+CV_FILES=(
+  aero1.jpg aero3.jpg aloeL.jpg apple.jpg baboon.jpg basketball1.png
+  basketball2.png box.png box_in_scene.png building.jpg butterfly.jpg
+  ela_original.jpg fruits.jpg graf1.png graf3.png home.jpg lena.jpg
+  leuvenA.jpg leuvenB.jpg licenseplate_motion.jpg messi5.jpg orange.jpg
+  pic2.png pic4.png rubberwhale1.png smarties.png squirrel_cls.jpg
+  starry_night.jpg
+)
+CV_JSDELIVR="https://cdn.jsdelivr.net/gh/opencv/opencv@4.x/samples/data"
+CV_RAW="https://raw.githubusercontent.com/opencv/opencv/4.x/samples/data"
+for f in "${CV_FILES[@]}"; do
+  [ -s "${OUT_DIR}/_calib/${f}" ] && continue
+  curl -sSfL --max-time 60 -o "${OUT_DIR}/_calib/${f}" "${CV_JSDELIVR}/${f}" \
+    || curl -sSfL --max-time 60 -o "${OUT_DIR}/_calib/${f}" "${CV_RAW}/${f}" \
+    || rm -f "${OUT_DIR}/_calib/${f}"
+done
+# ground-truth the concept tflite input semantics before conversion:
+# feed a cat under several normalizations and see which one classifies as cat
+if [ "${SKIP_CONCEPT}" != 1 ] && [ -n "${CONCEPT_TFLITE:-}" ] && [ -f "${CONCEPT_TFLITE}" ]; then
+  python3 -m pip install -q tflite-runtime pillow numpy >/dev/null 2>&1 || true
+  RTD_LABELS="${OUT_DIR}/labels.txt"
+  [ -f "${RTD_LABELS}" ] || RTD_LABELS=""
+  SAN_IMG1="${OUT_DIR}/_calib/cat_224x224.jpg"
+  SAN_IMG2="${OUT_DIR}/_calib/lena.jpg"
+  [ -f "${SAN_IMG1}" ] || SAN_IMG1="${OUT_DIR}/_calib/lena.jpg"
+  if [ -n "${RTD_LABELS}" ] && [ -f "${SAN_IMG1}" ]; then
+    log "=== tflite sanity (which normalization classifies the cat?) ==="
+    python3 "${PROJECT_DIR}/scripts/tflite-sanity.py" "${CONCEPT_TFLITE}" "${RTD_LABELS}" "${SAN_IMG1}" ${SAN_IMG2:+"${SAN_IMG2}"} || true
+  fi
+fi
+
+CALIB_COUNT=$(ls "${OUT_DIR}/_calib" 2>/dev/null | grep -ciE '\.(jpg|jpeg|png)$' || true)
+log "calibration images: ${CALIB_COUNT}"
+if [ "${CALIB_COUNT}" -ge 2 ]; then
+  CONVERT_CALIB_ARGS=(--calib-dir "${OUT_DIR}/_calib")
+else
+  log "WARNING: not enough calibration images; concept stays unquantized"
+  CONVERT_CALIB_ARGS=()
 fi
 
 run_convert

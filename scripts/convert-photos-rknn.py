@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Convert Photos concept TFLite + public face ONNX/PB graphs to RK3566 RKNN.
 
-Mean/std is NOT baked into the RKNN: npu_server feeds pre-normalized NCHW
-float32 using npu_model_conf.json. Official Vivante .nb weights cannot be
-converted; concept uses the official x86 TFLite, face uses public models
-that match the npu.Model ABI (512/320 detect, 112x112 / 128-d feature).
+The concept network is quantized to int8 (the proven-stable path on this
+driver stack) with mean/std baked into the graph via rknn.config: the model
+takes raw 0-255 pixels and npu_model_conf.json sets concept rgb_mean=0 /
+rgb_scale=1 so the server feeds unnormalized floats. Face graphs stay fp
+(no quantization dataset for them yet).
 """
 from __future__ import annotations
 
@@ -218,13 +219,21 @@ def fold_to_single_input(onnx_path: str) -> None:
     onnx.save(m, onnx_path)
 
 
-def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, input_size_list=None) -> None:
+def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, input_size_list=None,
+                quant: bool = False, dataset: str | None = None) -> None:
     apply_mapping_shim()
     ensure_opset(onnx_path)
     from rknn.api import RKNN
 
     rknn = RKNN(verbose=True)
-    rknn.config(target_platform=platform)
+    if quant:
+        # official concept tflite expects [0,1]-normalized input
+        # (tflite sanity: rgb_div255 -> animal+cat 1.000; raw 0-255 -> junk)
+        rknn.config(target_platform=platform,
+                    mean_values=[[0, 0, 0]],
+                    std_values=[[255, 255, 255]])
+    else:
+        rknn.config(target_platform=platform)
     kwargs = {"model": onnx_path}
     if inputs:
         kwargs["inputs"] = inputs
@@ -239,8 +248,11 @@ def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, inpu
     if ret != 0:
         rknn.release()
         raise SystemExit(f"load_onnx failed: {onnx_path}")
+    build_kwargs = {"do_quantization": False}
+    if quant:
+        build_kwargs = {"do_quantization": True, "dataset": dataset}
     try:
-        ret = rknn.build(do_quantization=False)
+        ret = rknn.build(**build_kwargs)
     except Exception as exc:
         rknn.release()
         raise SystemExit(f"build exception: {exc}") from exc
@@ -299,8 +311,8 @@ def write_conf(path: str, detect_w: int, detect_h: int, detect_kind: str, feat_w
         },
         "concept": {
             "reorder": False,
-            "rgb_mean": [127.5, 127.5, 127.5],
-            "rgb_scale": 0.00784313725,
+            "rgb_mean": [0.0, 0.0, 0.0],
+            "rgb_scale": 1.0,
             "net_size": [395, 395, 3],
             "result_thres": -1,
             "feature_size": 335,
@@ -323,6 +335,7 @@ def main() -> None:
     ap.add_argument("--detection-onnx")
     ap.add_argument("--feature-onnx")
     ap.add_argument("--feature-pb")
+    ap.add_argument("--calib-dir", help="dir of calibration jpgs for concept int8 quantization")
     ap.add_argument("--skip-concept", action="store_true")
     ap.add_argument("--skip-detection", action="store_true")
     ap.add_argument("--skip-feature", action="store_true")
@@ -344,7 +357,18 @@ def main() -> None:
         tflite_to_onnx(args.concept_tflite, onnx_path)
         rewrite_input_nchw(onnx_path)
         maybe_smoke(onnx_path)
-        export_rknn(onnx_path, os.path.join(out, "concept_network.rknn"), args.platform)
+        dataset = None
+        if args.calib_dir and os.path.isdir(args.calib_dir):
+            imgs = sorted(f for f in os.listdir(args.calib_dir)
+                          if f.lower().endswith((".jpg", ".jpeg", ".png")))
+            if imgs:
+                dataset = os.path.join(work, "calib.txt")
+                with open(dataset, "w") as f:
+                    for name in imgs:
+                        f.write(os.path.abspath(os.path.join(args.calib_dir, name)) + chr(10))
+                print("calibration images:", len(imgs))
+        export_rknn(onnx_path, os.path.join(out, "concept_network.rknn"), args.platform,
+                    quant=bool(dataset), dataset=dataset)
 
     if not args.skip_detection:
         if not args.detection_onnx or not os.path.isfile(args.detection_onnx):
