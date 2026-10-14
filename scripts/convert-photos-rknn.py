@@ -227,9 +227,11 @@ def export_rknn(onnx_path: str, rknn_path: str, platform: str, inputs=None, inpu
 
     rknn = RKNN(verbose=True)
     if quant:
+        # official concept tflite expects [0,1]-normalized input
+        # (tflite sanity: rgb_div255 -> animal+cat 1.000; raw 0-255 -> junk)
         rknn.config(target_platform=platform,
-                    mean_values=[[127.5, 127.5, 127.5]],
-                    std_values=[[127.5, 127.5, 127.5]])
+                    mean_values=[[0, 0, 0]],
+                    std_values=[[255, 255, 255]])
     else:
         rknn.config(target_platform=platform)
     kwargs = {"model": onnx_path}
