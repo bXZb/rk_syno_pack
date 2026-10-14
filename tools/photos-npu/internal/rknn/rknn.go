@@ -155,7 +155,7 @@ func (rt *Runtime) InferFloat32(ctx Context, input []float32, nOut int) ([][]flo
 		Buf:   unsafe.Pointer(&input[0]),
 		Size:  uint32(len(input) * 4),
 		Type:  TensorFloat32,
-		Fmt:   TensorNCHW,
+		Fmt:   TensorNHWC,
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
