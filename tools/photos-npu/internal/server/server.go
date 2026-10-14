@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,35 +106,33 @@ func (m *Model) ExecCmd(_ context.Context, req *npupb.CmdRequest) (*npupb.CmdRep
 
 func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest) (*npupb.ConceptDetectReply, error) {
 	reply := &npupb.ConceptDetectReply{ReplyMap: map[string]*npupb.ConceptInfos{}}
+	log.Printf("concept buf %d bytes", len(req.GetBuffer()))
 	scores, _, err := m.runNet("concept", req.GetBuffer(), m.conf.Concept, 1)
 	if err != nil {
 		log.Printf("concept infer: %v", err)
 		return reply, nil
 	}
 	if len(scores) == 0 {
+		log.Printf("concept no scores")
 		return reply, nil
 	}
 	out := scores[0]
-	for i, label := range m.labels {
-		if i >= len(out) {
-			break
-		}
+	// official protocol (from the plugin disasm): the reply map has a
+	// single "npu" key whose info array carries every label score in
+	// label order; the plugin zips it against labels itself
+	for i := range out {
 		s := out[i]
 		if s < 0 || s > 1 {
 			s = sigmoid(s)
 		}
-		th := float32(0)
-		if i < len(m.thresholds) {
-			th = m.thresholds[i]
-		}
-		if th > 0 && s < th {
-			continue
-		}
-		if s <= 0 {
-			continue
-		}
-		reply.ReplyMap[label] = &npupb.ConceptInfos{Info: []float32{s}}
+		out[i] = s
 	}
+	reply.ReplyMap["npu"] = &npupb.ConceptInfos{Info: out}
+	top := ""
+	for k := 0; k < len(out) && k < 5; k++ {
+	}
+	_ = top
+	log.Printf("concept npu array len=%d first5=%v", len(out), out[:5])
 	return reply, nil
 }
 
@@ -207,6 +207,30 @@ func (m *Model) runNet(kind string, jpeg []byte, cfg netCfg, nOut int) ([][]floa
 		nOut = 1
 	}
 	outs, err := m.rt.InferFloat32(ctx, prep.Data, nOut)
+	if kind == "concept" && err == nil && len(outs) > 0 {
+		type kv struct {
+			i int
+			v float32
+		}
+		arr := make([]kv, len(outs[0]))
+		for i, v := range outs[0] {
+			arr[i] = kv{i, v}
+		}
+		sort.Slice(arr, func(a, b int) bool { return arr[a].v > arr[b].v })
+		n := 5
+		if len(arr) < n {
+			n = len(arr)
+		}
+		msg := ""
+		for _, e := range arr[:n] {
+			lbl := ""
+			if e.i < len(m.labels) {
+				lbl = m.labels[e.i]
+			}
+			msg += fmt.Sprintf("%d:%s=%.4f ", e.i, lbl, e.v)
+		}
+		log.Printf("concept top: %s", msg)
+	}
 	return outs, prep, err
 }
 

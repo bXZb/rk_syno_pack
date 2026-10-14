@@ -43,8 +43,8 @@ func DecodeImage(buf []byte) (image.Image, error) {
 	return img, nil
 }
 
-// NCHWFloat32 letterboxes the image into a WxH RGB NCHW float32 tensor:
-// out[c*H*W + y*W + x] = (pixel[c] - mean) * scale
+// NCHWFloat32 letterboxes the image into a WxH RGB NHWC float32 tensor
+// (librknnrt normalize requires NHWC src): out[(y*W+x)*3+c] = (pixel[c]-mean)*scale
 func NCHWFloat32(img image.Image, cfg Config) []float32 {
 	return Prepare(img, cfg).Data
 }
@@ -104,7 +104,6 @@ func Prepare(img image.Image, cfg Config) Result {
 		sc = 1
 	}
 	out := make([]float32, 3*w*h)
-	plane := w * h
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			r, g, b, _ := dst.RGBAAt(x, y).RGBA()
@@ -114,10 +113,10 @@ func Prepare(img image.Image, cfg Config) Result {
 			if cfg.Reorder {
 				rf, gf, bf = bf, gf, rf
 			}
-			i := y*w + x
+			i := (y*w + x) * 3
 			out[i] = (rf - meanR) * sc
-			out[plane+i] = (gf - meanG) * sc
-			out[2*plane+i] = (bf - meanB) * sc
+			out[i+1] = (gf - meanG) * sc
+			out[i+2] = (bf - meanB) * sc
 		}
 	}
 	res.Data = out
