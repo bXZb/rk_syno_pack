@@ -323,7 +323,7 @@ done
 # feed a cat under several normalizations and see which one classifies as cat
 if [ "${SKIP_CONCEPT}" != 1 ] && [ -n "${CONCEPT_TFLITE:-}" ] && [ -f "${CONCEPT_TFLITE}" ]; then
   python3 -m pip install -q tflite-runtime >/dev/null 2>&1 || true
-  RTD_LABELS="${RTD_DIR:-}/npu/asset/labels.txt"
+  RTD_LABELS="${OUT_DIR}/labels.txt"
   [ -f "${RTD_LABELS}" ] || RTD_LABELS=""
   SAN_IMG1="${OUT_DIR}/_calib/cat_224x224.jpg"
   SAN_IMG2="${OUT_DIR}/_calib/lena.jpg"
