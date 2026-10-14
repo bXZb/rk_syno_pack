@@ -319,6 +319,21 @@ for f in "${CV_FILES[@]}"; do
     || curl -sSfL --max-time 60 -o "${OUT_DIR}/_calib/${f}" "${CV_RAW}/${f}" \
     || rm -f "${OUT_DIR}/_calib/${f}"
 done
+# ground-truth the concept tflite input semantics before conversion:
+# feed a cat under several normalizations and see which one classifies as cat
+if [ "${SKIP_CONCEPT}" != 1 ] && [ -n "${CONCEPT_TFLITE:-}" ] && [ -f "${CONCEPT_TFLITE}" ]; then
+  python3 -m pip install -q tflite-runtime >/dev/null 2>&1 || true
+  RTD_LABELS="${RTD_DIR:-}/npu/asset/labels.txt"
+  [ -f "${RTD_LABELS}" ] || RTD_LABELS=""
+  SAN_IMG1="${OUT_DIR}/_calib/cat_224x224.jpg"
+  SAN_IMG2="${OUT_DIR}/_calib/lena.jpg"
+  [ -f "${SAN_IMG1}" ] || SAN_IMG1="${OUT_DIR}/_calib/lena.jpg"
+  if [ -n "${RTD_LABELS}" ] && [ -f "${SAN_IMG1}" ]; then
+    log "=== tflite sanity (which normalization classifies the cat?) ==="
+    python3 "${PROJECT_DIR}/scripts/tflite-sanity.py" "${CONCEPT_TFLITE}" "${RTD_LABELS}" "${SAN_IMG1}" ${SAN_IMG2:+"${SAN_IMG2}"} || true
+  fi
+fi
+
 CALIB_COUNT=$(ls "${OUT_DIR}/_calib" 2>/dev/null | grep -ciE '\.(jpg|jpeg|png)$' || true)
 log "calibration images: ${CALIB_COUNT}"
 if [ "${CALIB_COUNT}" -ge 2 ]; then
