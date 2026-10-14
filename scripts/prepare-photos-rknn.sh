@@ -322,7 +322,7 @@ done
 # ground-truth the concept tflite input semantics before conversion:
 # feed a cat under several normalizations and see which one classifies as cat
 if [ "${SKIP_CONCEPT}" != 1 ] && [ -n "${CONCEPT_TFLITE:-}" ] && [ -f "${CONCEPT_TFLITE}" ]; then
-  python3 -m pip install -q tflite-runtime >/dev/null 2>&1 || true
+  python3 -m pip install -q tflite-runtime pillow numpy >/dev/null 2>&1 || true
   RTD_LABELS="${OUT_DIR}/labels.txt"
   [ -f "${RTD_LABELS}" ] || RTD_LABELS=""
   SAN_IMG1="${OUT_DIR}/_calib/cat_224x224.jpg"
