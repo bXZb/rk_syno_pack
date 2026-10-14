@@ -117,26 +117,22 @@ func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest)
 		return reply, nil
 	}
 	out := scores[0]
-	for i, label := range m.labels {
-		if i >= len(out) {
-			break
-		}
+	// official protocol (from the plugin disasm): the reply map has a
+	// single "npu" key whose info array carries every label score in
+	// label order; the plugin zips it against labels itself
+	for i := range out {
 		s := out[i]
 		if s < 0 || s > 1 {
 			s = sigmoid(s)
 		}
-		// the plugin enforces len(reply) == len(labels) ("output score size
-		// of model is not equal to labels"); hand back every label's score and
-		// let the plugin apply the thresholds itself
-		reply.ReplyMap[label] = &npupb.ConceptInfos{Info: []float32{s}}
+		out[i] = s
 	}
-	log.Printf("concept picked %d labels: %v", len(reply.ReplyMap), func() string {
-		s := ""
-		for k, v := range reply.ReplyMap {
-			s += fmt.Sprintf("%s=%.3f ", k, v.Info[0])
-		}
-		return s
-	}())
+	reply.ReplyMap["npu"] = &npupb.ConceptInfos{Info: out}
+	top := ""
+	for k := 0; k < len(out) && k < 5; k++ {
+	}
+	_ = top
+	log.Printf("concept npu array len=%d first5=%v", len(out), out[:5])
 	return reply, nil
 }
 
