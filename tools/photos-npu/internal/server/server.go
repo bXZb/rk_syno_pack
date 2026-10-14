@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sort"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -104,12 +105,14 @@ func (m *Model) ExecCmd(_ context.Context, req *npupb.CmdRequest) (*npupb.CmdRep
 
 func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest) (*npupb.ConceptDetectReply, error) {
 	reply := &npupb.ConceptDetectReply{ReplyMap: map[string]*npupb.ConceptInfos{}}
+	log.Printf("concept buf %d bytes", len(req.GetBuffer()))
 	scores, _, err := m.runNet("concept", req.GetBuffer(), m.conf.Concept, 1)
 	if err != nil {
 		log.Printf("concept infer: %v", err)
 		return reply, nil
 	}
 	if len(scores) == 0 {
+		log.Printf("concept no scores")
 		return reply, nil
 	}
 	out := scores[0]
@@ -133,6 +136,13 @@ func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest)
 		}
 		reply.ReplyMap[label] = &npupb.ConceptInfos{Info: []float32{s}}
 	}
+	log.Printf("concept picked %d labels: %v", len(reply.ReplyMap), func() string {
+		s := ""
+		for k, v := range reply.ReplyMap {
+			s += fmt.Sprintf("%s=%.3f ", k, v.Info[0])
+		}
+		return s
+	}())
 	return reply, nil
 }
 
@@ -207,6 +217,30 @@ func (m *Model) runNet(kind string, jpeg []byte, cfg netCfg, nOut int) ([][]floa
 		nOut = 1
 	}
 	outs, err := m.rt.InferFloat32(ctx, prep.Data, nOut)
+	if kind == "concept" && err == nil && len(outs) > 0 {
+		type kv struct {
+			i int
+			v float32
+		}
+		arr := make([]kv, len(outs[0]))
+		for i, v := range outs[0] {
+			arr[i] = kv{i, v}
+		}
+		sort.Slice(arr, func(a, b int) bool { return arr[a].v > arr[b].v })
+		n := 5
+		if len(arr) < n {
+			n = len(arr)
+		}
+		msg := ""
+		for _, e := range arr[:n] {
+			lbl := ""
+			if e.i < len(m.labels) {
+				lbl = m.labels[e.i]
+			}
+			msg += fmt.Sprintf("%d:%s=%.4f ", e.i, lbl, e.v)
+		}
+		log.Printf("concept top: %s", msg)
+	}
 	return outs, prep, err
 }
 
