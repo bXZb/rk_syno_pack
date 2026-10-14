@@ -125,16 +125,9 @@ func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest)
 		if s < 0 || s > 1 {
 			s = sigmoid(s)
 		}
-		th := float32(0)
-		if i < len(m.thresholds) {
-			th = m.thresholds[i]
-		}
-		if th > 0 && s < th {
-			continue
-		}
-		if s <= 0 {
-			continue
-		}
+		// the plugin enforces len(reply) == len(labels) ("output score size
+		// of model is not equal to labels"); hand back every label's score and
+		// let the plugin apply the thresholds itself
 		reply.ReplyMap[label] = &npupb.ConceptInfos{Info: []float32{s}}
 	}
 	log.Printf("concept picked %d labels: %v", len(reply.ReplyMap), func() string {
