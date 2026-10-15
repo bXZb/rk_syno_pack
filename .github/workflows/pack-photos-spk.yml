@@ -112,7 +112,8 @@ jobs:
               for w in wanted:
                   assert any(n.endswith(w) for n in pkg), w
               # launcher must be POSIX (DSM /bin/sh is ash) and location-agnostic
-              launcher = p.extractfile("npu/run_server.sh").read().decode()
+              launcher_name = next(n for n in pkg if n.endswith("npu/run_server.sh"))
+              launcher = p.extractfile(launcher_name).read().decode()
               assert launcher.startswith("#!/bin/sh"), "run_server.sh must be POSIX sh"
               assert "case " in launcher and "BASEDIR" in launcher, "run_server.sh layout"
           for marker in [
