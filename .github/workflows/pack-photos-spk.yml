@@ -1,23 +1,23 @@
-name: Pack Synology Photos OEC NPU SPK
+name: Photos OEC NPU overlay bundle
 
 on:
   workflow_dispatch:
     inputs:
       photos_version:
-        description: Official Photos SPK version
+        description: Official Photos SPK version (model/lib source)
         required: false
         default: '1.9.1-10928'
   push:
     paths:
       - '.github/workflows/pack-photos-spk.yml'
-      - 'scripts/pack-photos-spk.sh'
+      - 'scripts/pack-photos-overlay.sh'
       - 'scripts/prepare-photos-rknn.sh'
       - 'scripts/convert-photos-rknn.py'
       - 'tools/photos-npu/**'
   pull_request:
     paths:
       - '.github/workflows/pack-photos-spk.yml'
-      - 'scripts/pack-photos-spk.sh'
+      - 'scripts/pack-photos-overlay.sh'
       - 'scripts/prepare-photos-rknn.sh'
       - 'scripts/convert-photos-rknn.py'
       - 'tools/photos-npu/**'
@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pack:
+  overlay:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install packer + convert deps
+      - name: Install convert deps
         run: |
           sudo apt-get update
           sudo apt-get install -y g++ libsodium-dev libmsgpack-dev xz-utils curl unzip file git
@@ -56,9 +56,9 @@ jobs:
         working-directory: tools/photos-npu
         run: go test ./...
 
-      - name: Download, decrypt, convert RKNN + librknnrt
+      - name: Convert RKNN + extract librknnrt
         run: |
-          chmod +x scripts/prepare-photos-rknn.sh scripts/pack-photos-spk.sh scripts/convert-photos-rknn.py
+          chmod +x scripts/prepare-photos-rknn.sh scripts/pack-photos-overlay.sh scripts/convert-photos-rknn.py
           scripts/prepare-photos-rknn.sh \
             --photos-version "${PHOTOS_VERSION}" \
             --out-dir build/photos-rknn \
@@ -71,88 +71,82 @@ jobs:
           test -f build/photos-rknn/feature_network.rknn
           file build/photos-rknn/librknnrt.so
 
-      - name: Pack OEC Photos SPK
+      - name: Assemble overlay bundle
+        env:
+          RKNN_DIR: ${{ github.workspace }}/build/photos-rknn
         run: |
-          scripts/pack-photos-spk.sh \
-            --photos-version "${PHOTOS_VERSION}" \
-            --rknn-dir build/photos-rknn \
-            --require-rknn
+          scripts/pack-photos-overlay.sh output/dsm/photos-npu-overlay.tar.gz
 
-      - name: Verify SPK is installable (unsigned tar + NPU bits)
+      - name: Verify bundle
         run: |
           set -euo pipefail
-          ls -lh output/dsm/SynologyPhotos-*-oec-npu.spk
+          ls -lh output/dsm/photos-npu-overlay.tar.gz
+          mkdir -p build/verify && tar -xzf output/dsm/photos-npu-overlay.tar.gz -C build/verify
+          cd build/verify
           python3 - <<'PY'
-          import tarfile, glob, io, lzma, os
-          spk = glob.glob("output/dsm/SynologyPhotos-*-oec-npu.spk")[0]
-          print("spk", spk, os.path.getsize(spk))
-          with tarfile.open(spk) as t:
-              names = t.getnames()
-              print("spk members", names)
-              assert "INFO" in names and "package.tgz" in names
-              info = t.extractfile("INFO").read().decode()
-              print(info)
-              assert 'package="SynologyPhotos"' in info
-              assert 'arch="rtd1619b"' in info
-              raw = t.extractfile("package.tgz").read()
-              hook_name = next(n for n in names if n.endswith("scripts/oec-enable-npu.sh"))
-              hook = t.extractfile(hook_name).read().decode()
-          with tarfile.open(fileobj=io.BytesIO(lzma.decompress(raw))) as p:
-              pkg = p.getnames()
-              wanted = [
-                  "npu/npu_server",
-                  "npu/OEC_NPU",
-                  "npu/lib_arm64/librknnrt.so",
-                  "npu/asset/network/concept_network.rknn",
-                  "npu/asset/network/detection_network.rknn",
-                  "npu/asset/network/feature_network.rknn",
-                  "npu/npu_model_conf.json",
-                  "npu/run_server.sh",
-              ]
-              for w in wanted:
-                  assert any(n.endswith(w) for n in pkg), w
-              # launcher must be POSIX (DSM /bin/sh is ash) and location-agnostic
-              launcher_name = next(n for n in pkg if n.endswith("npu/run_server.sh"))
-              launcher = p.extractfile(launcher_name).read().decode()
-              assert launcher.startswith("#!/bin/sh"), "run_server.sh must be POSIX sh"
-              assert "case " in launcher and "BASEDIR" in launcher, "run_server.sh layout"
-          for marker in [
-              "-c /dev/rknpu",        # real char device, not a touched file
-              "/usr/local/oec-npu",   # AppArmor relocation create-or-sync
-              "setsid",               # daemonized spawn
-              "SkipMemoryCheck",
-          ]:
-              assert marker in hook, "hook missing: " + marker
+          import os
+          wanted = [
+              "apply-oec-npu.sh",
+              "oec-enable-npu.sh",
+              "README.txt",
+              "npu/npu_server",
+              "npu/run_server.sh",
+              "npu/npu_model_conf.json",
+              "npu/asset/labels.txt",
+              "npu/asset/thresholds.txt",
+              "npu/asset/network/concept_network.rknn",
+              "npu/asset/network/detection_network.rknn",
+              "npu/asset/network/feature_network.rknn",
+              "npu/lib_arm64/librknnrt.so",
+          ]
+          for w in wanted:
+              assert os.path.isfile(w), "missing " + w
+          server = open("npu/npu_server", "rb").read()
+          assert server[:4] == b"\x7fELF" and server[18] == 0xb7, "npu_server not arm64 ELF"
+          for s in [b"concept top:", b"ConceptDetectBuffer"]:
+              assert s in server, "npu_server missing marker " + repr(s)
+          for f in ["apply-oec-npu.sh", "oec-enable-npu.sh", "npu/run_server.sh"]:
+              body = open(f, encoding="utf-8").read()
+              assert body.startswith("#!/bin/sh"), f + " must be POSIX sh"
+          hook = open("oec-enable-npu.sh").read()
+          for marker in ["-c /dev/rknpu", "/usr/local/oec-npu", "setsid", "SkipMemoryCheck"]:
+              assert marker in hook, "hook missing " + marker
           assert "touch /dev/galcore" not in hook, "hook regressed to fake galcore"
-          print("SPK layout OK (runtime + 3 RKNN models + v7 hook + POSIX launcher)")
+          apply = open("apply-oec-npu.sh").read()
+          for marker in ["concept_threshold", "synofoto-bin-regenerate-many-unit-has-many-concept",
+                         "start-stop-status", "npu-stock-backup"]:
+              assert marker in apply, "apply script missing " + marker
+          print("bundle OK: arm64 server + 3 RKNN models + v7 hook + POSIX scripts")
           PY
 
       - name: Job summary
         if: always()
         run: |
           {
-            echo "## Synology Photos OEC NPU SPK"
+            echo "## Photos OEC NPU overlay bundle"
             echo
-            echo "Install on the DS124 / OECT box (unsigned sideload):"
+            echo "Prereq: official (signed) SynologyPhotos installed on the box."
+            echo "On the box (root, from the extracted dir):"
             echo
             echo '```'
-            echo "synopkg install SynologyPhotos-rtd1619b-${PHOTOS_VERSION}-oec-npu.spk"
+            echo "sudo sh apply-oec-npu.sh"
             echo '```'
             echo
+            echo "Re-run after any SynologyPhotos package upgrade."
             if [ -f build/photos-rknn/MANIFEST.txt ]; then
               echo "### Converted bits"
               echo '```'
               cat build/photos-rknn/MANIFEST.txt
               echo '```'
             fi
-            ls -lh output/dsm/SynologyPhotos-*-oec-npu.spk 2>/dev/null || true
+            ls -lh output/dsm/photos-npu-overlay.tar.gz 2>/dev/null || true
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: synology-photos-oec-npu-spk
+          name: photos-npu-overlay
           path: |
-            output/dsm/SynologyPhotos-*-oec-npu.spk
+            output/dsm/photos-npu-overlay.tar.gz
             build/photos-rknn/MANIFEST.txt
           if-no-files-found: error
           retention-days: 30
