@@ -71,6 +71,7 @@ Re-run after any SynologyPhotos package upgrade.
 EOF
 
 mkdir -p "$(dirname "${OUT}")"
+OUT="$(cd "$(dirname "${OUT}")" && pwd)/$(basename "${OUT}")"
 ( cd "${STAGE}" && tar -czf "${OUT}" . )
 log "bundle: ${OUT} ($(du -h "${OUT}" | cut -f1))"
 tar -tzf "${OUT}"
