@@ -128,10 +128,6 @@ func (m *Model) ConceptDetectBuffer(_ context.Context, req *npupb.BufferRequest)
 		out[i] = s
 	}
 	reply.ReplyMap["npu"] = &npupb.ConceptInfos{Info: out}
-	top := ""
-	for k := 0; k < len(out) && k < 5; k++ {
-	}
-	_ = top
 	log.Printf("concept npu array len=%d first5=%v", len(out), out[:5])
 	return reply, nil
 }
