@@ -3,7 +3,7 @@ module github.com/bXZb/rk_syno_pack/tools/photos-npu
 go 1.22
 
 require (
-	github.com/ebitengine/purego v0.8.3
+	github.com/ebitengine/purego v0.11.2
 	google.golang.org/grpc v1.67.3
 	google.golang.org/protobuf v1.35.2
 )
