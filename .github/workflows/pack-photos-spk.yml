@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   overlay:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       PHOTOS_VERSION: ${{ github.event.inputs.photos_version || '1.9.1-10928' }}
