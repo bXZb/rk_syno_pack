@@ -50,7 +50,7 @@ jobs:
       - name: Install convert deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ libsodium-dev libmsgpack-dev xz-utils curl unzip file git
+          sudo apt-get install -y g++ libsodium-dev libmsgpack-dev libmsgpack-cxx-dev xz-utils curl unzip file git
 
       - name: Test npu_server
         working-directory: tools/photos-npu

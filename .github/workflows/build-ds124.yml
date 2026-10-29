@@ -67,7 +67,7 @@ jobs:
             build-essential bc bison flex libssl-dev libelf-dev dwarves \
             cpio xz-utils patch curl e2fsprogs device-tree-compiler \
             dosfstools mtools gdisk gzip vim-common \
-            libsodium-dev libmsgpack-dev g++
+            libsodium-dev libmsgpack-dev libmsgpack-cxx-dev g++
 
       - name: Build SynoXtract
         run: |
